@@ -197,7 +197,7 @@ fn build_bind_lines(shell: &str, spec: &KeySpec) -> Result<String, String> {
             "bind -x '\"{seq}\": \"xconsoler --summon\"' 2>/dev/null || true\n"
         )),
         "zsh" => Ok(format!(
-            "xconsoler_invoke() {{ zle -I; xconsoler --summon \"$@\"; }}\n\
+            "xconsoler_invoke() {{ zle -I; xconsoler --summon \"$@\" </dev/tty; zle reset-prompt }}\n\
              zle -N xconsoler_invoke\n\
              bindkey '{seq}' xconsoler_invoke\n"
         )),
@@ -293,7 +293,7 @@ mod tests {
         let k = keyspec::parse("alt+d").unwrap();
         assert_eq!(
             build_bind_lines("zsh", &k).unwrap(),
-            "xconsoler_invoke() { zle -I; xconsoler --summon \"$@\"; }\n\
+            "xconsoler_invoke() { zle -I; xconsoler --summon \"$@\" </dev/tty; zle reset-prompt }\n\
              zle -N xconsoler_invoke\n\
              bindkey '\\ed' xconsoler_invoke\n"
         );
