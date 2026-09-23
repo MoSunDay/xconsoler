@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::alias;
+use crate::keyspec;
 use crate::matcher::Candidate;
 use crate::platform::{self, Platform};
 use crate::state::{self, App, Visibility, CANDIDATE_LIMIT};
@@ -28,8 +29,17 @@ const SUBTLE: Color = Color::Gray;
 const TEXT: Color = Color::White;
 
 const MAIN_TITLE: &str = " xconsoler ";
-const HIDDEN_HINT: &str = " xconsoler hidden — Alt+D wake · Ctrl+C quit ";
-const KEYS_HINT: &str = " Alt+D hide · Enter run · ↑↓/Tab select · Ctrl+U clear · Ctrl+C quit ";
+
+/// Hidden-mode one-liner; the wake key is injected at render time so a
+/// custom `--wake-key` / stored config shows the real binding.
+fn hidden_hint(wake: &str) -> String {
+    format!(" xconsoler hidden — {wake} wake · Ctrl+C quit ")
+}
+
+/// Key-hints line shown under the list when there is no status message.
+fn keys_hint(wake: &str) -> String {
+    format!(" {wake} hide · Enter run · ↑↓/Tab select · Ctrl+U clear · Ctrl+C quit ")
+}
 const HELP_TITLE: &str = " : commands ";
 
 /// Help lines shown while the input starts with `:`; the first word of each
@@ -48,15 +58,15 @@ pub fn draw(f: &mut Frame, app: &App) {
     // not leave stale cells behind (ratatui only diffs what is re-rendered).
     f.render_widget(Clear, f.area());
     match app.visibility {
-        Visibility::Hidden => draw_hidden(f),
+        Visibility::Hidden => draw_hidden(f, app),
         Visibility::Shown => draw_shown(f, app),
     }
 }
 
-fn draw_hidden(f: &mut Frame) {
+fn draw_hidden(f: &mut Frame, app: &App) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            HIDDEN_HINT,
+            hidden_hint(&keyspec::describe(&app.wake)),
             Style::new().fg(MUTED),
         ))),
         row_rect(f.area().width, 0, 1),
@@ -159,7 +169,10 @@ fn draw_status(f: &mut Frame, app: &App, width: u16, y: u16) {
             Span::styled("✗ ", Style::new().fg(ERR)),
             Span::styled(msg.clone(), Style::new().fg(ERR)),
         ]),
-        None => Line::from(Span::styled(KEYS_HINT, Style::new().fg(MUTED))),
+        None => Line::from(Span::styled(
+            keys_hint(&keyspec::describe(&app.wake)),
+            Style::new().fg(MUTED),
+        )),
     };
     f.render_widget(Paragraph::new(line), row_rect(width, y, 1));
 }
@@ -290,19 +303,31 @@ mod tests {
 
     #[test]
     fn hidden_frame_shows_only_the_hint() {
-        let app = state::new(Store::default());
+        let mut app = state::new(Store::default(), false);
+        app.visibility = Visibility::Hidden; // apps start Shown
         let text = draw_once(&app);
-        assert!(text.contains("Alt+D"));
+        assert!(text.contains("alt+d"));
         assert!(text.contains("hidden"));
         assert!(!text.contains("❯"));
+    }
+
+    #[test]
+    fn hints_reflect_a_custom_wake_key() {
+        let mut app = state::new(Store::default(), false);
+        app.wake = crate::keyspec::parse("ctrl+g").unwrap();
+        let shown_text = draw_once(&app);
+        assert!(shown_text.contains("ctrl+g hide"));
+        assert!(!shown_text.contains("alt+d"));
+        app.visibility = Visibility::Hidden;
+        let hidden_text = draw_once(&app);
+        assert!(hidden_text.contains("ctrl+g wake"));
     }
 
     #[test]
     fn shown_frame_renders_bar_candidates_selection_and_status() {
         let mut store = Store::default();
         record(&mut store, "browser", "docs", 1);
-        let mut app = state::new(store);
-        app.visibility = Visibility::Shown;
+        let mut app = state::new(store, false);
         app.cursor = 1; // selects the first alias row (browser)
 
         let text = draw_once(&app);
@@ -311,13 +336,12 @@ mod tests {
         assert!(text.contains("★")); // alias rows
         assert!(text.contains("browser (br)"));
         assert!(text.contains("xdg-open")); // linux template of selected row
-        assert!(text.contains("Alt+D hide")); // key hints (status None)
+        assert!(text.contains("alt+d hide")); // key hints (status None)
     }
 
     #[test]
     fn status_line_replaces_key_hints() {
-        let mut app = state::new(Store::default());
-        app.visibility = Visibility::Shown;
+        let mut app = state::new(Store::default(), false);
         app.status = Some((true, "t ok: hello".to_string()));
         let ok = draw_once(&app);
         assert!(ok.contains("✓ t ok: hello"));
@@ -328,8 +352,7 @@ mod tests {
 
     #[test]
     fn colon_prefix_swaps_list_for_help_block() {
-        let mut app = state::new(Store::default());
-        app.visibility = Visibility::Shown;
+        let mut app = state::new(Store::default(), false);
         app.input = ":add t echo {input}".to_string();
         let text = draw_once(&app);
         assert!(text.contains(":add"));
@@ -340,14 +363,13 @@ mod tests {
 
     #[test]
     fn no_candidates_draws_no_list_but_keeps_status() {
-        let mut app = state::new(Store::default());
-        app.visibility = Visibility::Shown;
+        let mut app = state::new(Store::default(), false);
         app.input = "zzz".to_string();
         app.aliases.clear();
         let text = draw_once(&app);
         assert!(!text.contains("★"));
         assert!(!text.contains("matches"));
-        assert!(text.contains("Alt+D hide"));
+        assert!(text.contains("alt+d hide"));
         assert!(text.contains("❯ zzz"));
     }
 }

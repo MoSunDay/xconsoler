@@ -9,6 +9,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::alias::{self, AliasDef};
+use crate::keyspec;
 
 /// Hard cap on stored history entries.
 pub const MAX_HISTORY: usize = 10_000;
@@ -43,12 +44,39 @@ impl HistoryEntry {
     }
 }
 
+/// User preferences persisted alongside the aliases/history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Config {
+    /// Wake-key spec string (`keyspec::DEFAULT_SPEC` when absent).
+    pub wake_key: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            wake_key: keyspec::DEFAULT_SPEC.to_string(),
+        }
+    }
+}
+
 /// Persisted state. `aliases` holds user-defined aliases only; built-ins are
 /// merged back in at load time (see [`merge_aliases`]).
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Store {
+    /// `#[serde(default)]`: stores written before the config existed load
+    /// with the default wake key.
+    #[serde(default)]
+    pub config: Config,
     pub aliases: Vec<AliasDef>,
     pub history: Vec<HistoryEntry>,
+}
+
+/// Validate a wake-key spec and persist its canonical form
+/// (`keyspec::describe`) into the store.
+pub fn set_wake_key(store: &mut Store, spec: &str) -> Result<(), String> {
+    let parsed = keyspec::parse(spec)?;
+    store.config.wake_key = keyspec::describe(&parsed);
+    Ok(())
 }
 
 /// Config directory for xconsoler (falls back to `~/.xconsoler` when the
@@ -227,5 +255,52 @@ mod tests {
         assert_eq!(merged[0].name, "browser");
         assert_eq!(merged[1].name, "clipboard");
         assert_eq!(merged.last().unwrap().name, "mine");
+    }
+
+    #[test]
+    fn old_store_json_without_config_gets_default_wake_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.json");
+        let old = serde_json::json!({
+            "aliases": [user_def("mine", Some("echo {input}"))],
+            "history": []
+        });
+        fs::write(&path, old.to_string()).unwrap();
+
+        let store = load(&path);
+        assert_eq!(store.config, Config::default());
+        assert_eq!(store.config.wake_key, keyspec::DEFAULT_SPEC);
+        assert_eq!(store.aliases.len(), 1);
+    }
+
+    #[test]
+    fn default_store_has_default_wake_key() {
+        assert_eq!(Store::default().config.wake_key, "alt+d");
+    }
+
+    #[test]
+    fn set_wake_key_validates_and_normalizes() {
+        let mut store = Store::default();
+        assert!(set_wake_key(&mut store, "alt+J").is_ok());
+        assert_eq!(store.config.wake_key, "alt+j");
+        assert!(set_wake_key(&mut store, "ctrl+g").is_ok());
+        assert_eq!(store.config.wake_key, "ctrl+g");
+        let err = set_wake_key(&mut store, "alt+ctrl+x").unwrap_err();
+        assert!(err.contains("alt+ctrl combo unsupported"));
+        // rejected specs leave the previous value in place
+        assert_eq!(store.config.wake_key, "ctrl+g");
+    }
+
+    #[test]
+    fn set_wake_key_roundtrips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.json");
+        let mut store = Store::default();
+        set_wake_key(&mut store, "alt+j").unwrap();
+        save(&path, &store).unwrap();
+
+        let loaded = load(&path);
+        assert_eq!(loaded.config.wake_key, "alt+j");
+        assert_eq!(loaded.config, store.config);
     }
 }

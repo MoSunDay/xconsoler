@@ -191,16 +191,13 @@ mod tests {
     fn setup() -> (App, TempDir, std::path::PathBuf) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("store.json");
-        (state::new(Store::default()), dir, path)
+        (state::new(Store::default(), false), dir, path)
     }
 
+    /// Force the shown state directly (apps start shown; the old helper
+    /// toggled from the old hidden start).
     fn shown(app: &mut App) {
-        apply(
-            app,
-            Action::ToggleBar,
-            Platform::Linux,
-            Path::new("/dev/null"),
-        );
+        app.visibility = Visibility::Shown;
     }
 
     fn type_str(app: &mut App, s: &str, path: &Path) {

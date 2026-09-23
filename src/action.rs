@@ -2,6 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::keyspec;
 use crate::state::{App, Visibility};
 
 /// One user intent, applied by `crate::app::apply`.
@@ -27,11 +28,15 @@ pub fn on_key(app: &App, key: KeyEvent) -> Action {
         return Action::Nop;
     }
 
-    // Global wake/sleep hotkey: Alt+D (exactly ALT — no Ctrl/Shift riding along).
-    if let KeyCode::Char('d' | 'D') = key.code {
-        if key.modifiers == KeyModifiers::ALT {
-            return Action::ToggleBar;
-        }
+    // Global wake/sleep hotkey (`app.wake`, configurable via the store): in
+    // summon mode it quits back to the shell prompt, otherwise it toggles.
+    if keyspec::matches(&app.wake, &key) {
+        return if app.summon { Action::Quit } else { Action::ToggleBar };
+    }
+
+    // Esc (unmodified): summon mode quits, otherwise it toggles the bar.
+    if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+        return if app.summon { Action::Quit } else { Action::ToggleBar };
     }
 
     match app.visibility {
@@ -82,14 +87,21 @@ mod tests {
         KeyEvent::new_with_kind(code, modifiers, KeyEventKind::Release)
     }
 
+    /// Non-summon app parked in Hidden (apps start Shown; hide explicitly).
     fn hidden() -> App {
-        state::new(crate::storage::Store::default())
+        let mut app = state::new(crate::storage::Store::default(), false);
+        app.visibility = Visibility::Hidden;
+        app
     }
 
+    /// Non-summon app, default state (shown).
     fn shown() -> App {
-        let mut app = hidden();
-        app.visibility = Visibility::Shown;
-        app
+        state::new(crate::storage::Store::default(), false)
+    }
+
+    /// Summon-mode app (shell keybind): shown, wake key / Esc quit.
+    fn summon() -> App {
+        state::new(crate::storage::Store::default(), true)
     }
 
     #[test]
@@ -105,13 +117,60 @@ mod tests {
     }
 
     #[test]
-    fn alt_d_with_extra_modifiers_is_not_the_hotkey() {
-        let mut m = KeyModifiers::ALT;
-        m |= KeyModifiers::CONTROL;
-        assert_eq!(on_key(&hidden(), key(KeyCode::Char('d'), m)), Action::Nop);
-        let mut m = KeyModifiers::ALT;
-        m |= KeyModifiers::SHIFT;
-        assert_eq!(on_key(&shown(), key(KeyCode::Char('d'), m)), Action::Nop);
+    fn alt_shift_d_still_wakes_but_ctrl_riding_along_does_not() {
+        let alt_shift = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        assert_eq!(
+            on_key(&shown(), key(KeyCode::Char('d'), alt_shift)),
+            Action::ToggleBar,
+            "SHIFT is ignored by the wake matcher"
+        );
+        let alt_ctrl = KeyModifiers::ALT | KeyModifiers::CONTROL;
+        assert_eq!(on_key(&hidden(), key(KeyCode::Char('d'), alt_ctrl)), Action::Nop);
+    }
+
+    #[test]
+    fn custom_wake_key_replaces_alt_d() {
+        let mut app = shown();
+        app.wake = keyspec::parse("ctrl+g").unwrap();
+        assert_eq!(
+            on_key(&app, key(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            Action::ToggleBar
+        );
+        // alt+d is no longer special: plain InsertChar while shown
+        assert_eq!(
+            on_key(&app, key(KeyCode::Char('d'), KeyModifiers::ALT)),
+            Action::Nop
+        );
+    }
+
+    #[test]
+    fn summon_wake_key_quits() {
+        assert_eq!(
+            on_key(&summon(), key(KeyCode::Char('d'), KeyModifiers::ALT)),
+            Action::Quit
+        );
+        let mut app = summon();
+        app.wake = keyspec::parse("ctrl+g").unwrap();
+        assert_eq!(
+            on_key(&app, key(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            Action::Quit
+        );
+    }
+
+    #[test]
+    fn summon_esc_quits_non_summon_esc_toggles() {
+        assert_eq!(
+            on_key(&summon(), key(KeyCode::Esc, KeyModifiers::NONE)),
+            Action::Quit
+        );
+        assert_eq!(
+            on_key(&shown(), key(KeyCode::Esc, KeyModifiers::NONE)),
+            Action::ToggleBar
+        );
+        assert_eq!(
+            on_key(&hidden(), key(KeyCode::Esc, KeyModifiers::NONE)),
+            Action::ToggleBar
+        );
     }
 
     #[test]
@@ -134,10 +193,6 @@ mod tests {
         );
         assert_eq!(
             on_key(&hidden(), key(KeyCode::Char('x'), KeyModifiers::NONE)),
-            Action::Nop
-        );
-        assert_eq!(
-            on_key(&hidden(), key(KeyCode::Esc, KeyModifiers::NONE)),
             Action::Nop
         );
     }
