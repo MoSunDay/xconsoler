@@ -1,9 +1,11 @@
 pub mod action;
 pub mod alias;
 pub mod app;
+pub mod escguard;
 pub mod exec;
 pub mod fuzzy;
 pub mod history;
+pub mod keyspec;
 pub mod matcher;
 pub mod platform;
 pub mod render;

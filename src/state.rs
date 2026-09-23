@@ -4,14 +4,15 @@
 //! (`crate::action` maps keys, `crate::app` mutates, `crate::render` draws).
 
 use crate::alias::AliasDef;
+use crate::keyspec::{self, KeySpec};
 use crate::matcher::{self, Candidate};
 use crate::storage::{self, Store};
 
 /// Max candidates shown (and ranked) at once.
 pub const CANDIDATE_LIMIT: usize = 8;
 
-/// Whether the launcher bar is on screen. Starts [`Visibility::Hidden`] so a
-/// globally-bound hotkey (tmux `M-d`) can wake it.
+/// Whether the launcher bar is on screen. New apps start [`Visibility::Shown`]
+/// — a fresh launch must be visible, not look like it exited instantly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Visibility {
     Hidden,
@@ -31,19 +32,28 @@ pub struct App {
     /// Transient message: `(ok?, text)`. Reset by most input changes.
     pub status: Option<(bool, String)>,
     pub quit: bool,
+    /// The wake/sleep key, parsed from `store.config.wake_key`.
+    pub wake: KeySpec,
+    /// Summon mode (started from a shell keybind): the wake key / Esc quit
+    /// back to the prompt instead of hiding the bar.
+    pub summon: bool,
 }
 
-/// Build an app from a loaded store: hidden, empty input, merged aliases.
-pub fn new(store: Store) -> App {
+/// Build an app from a loaded store: **shown**, empty input, merged aliases.
+/// An unparsable stored wake key falls back to [`keyspec::DEFAULT`].
+pub fn new(store: Store, summon: bool) -> App {
     let aliases = storage::merge_aliases(&store.aliases);
+    let wake = keyspec::parse(&store.config.wake_key).unwrap_or(keyspec::DEFAULT);
     App {
         store,
         aliases,
         input: String::new(),
         cursor: 0,
-        visibility: Visibility::Hidden,
+        visibility: Visibility::Shown,
         status: None,
         quit: false,
+        wake,
+        summon,
     }
 }
 
@@ -74,18 +84,38 @@ mod tests {
         let mut store = Store::default();
         record(&mut store, "browser", "a", 1);
         record(&mut store, "browser", "b", 2);
-        new(store)
+        new(store, false)
     }
 
     #[test]
-    fn new_starts_hidden_with_merged_aliases() {
-        let app = new(Store::default());
-        assert_eq!(app.visibility, Visibility::Hidden);
+    fn new_starts_shown_with_merged_aliases() {
+        let app = new(Store::default(), false);
+        assert_eq!(app.visibility, Visibility::Shown);
         assert!(app.input.is_empty());
         assert_eq!(app.cursor, 0);
         assert_eq!(app.status, None);
         assert!(!app.quit);
+        assert!(!app.summon);
+        assert_eq!(app.wake, keyspec::parse(keyspec::DEFAULT_SPEC).unwrap());
         assert_eq!(app.aliases, storage::merge_aliases(&[]));
+    }
+
+    #[test]
+    fn new_records_summon_and_parses_stored_wake_key() {
+        let mut store = Store::default();
+        store.config.wake_key = "ctrl+g".to_string();
+        let app = new(store, true);
+        assert!(app.summon);
+        assert_eq!(app.visibility, Visibility::Shown);
+        assert_eq!(app.wake, keyspec::parse("ctrl+g").unwrap());
+    }
+
+    #[test]
+    fn invalid_stored_wake_key_falls_back_to_default() {
+        let mut store = Store::default();
+        store.config.wake_key = "garbage".to_string();
+        let app = new(store, false);
+        assert_eq!(app.wake, keyspec::DEFAULT);
     }
 
     #[test]
@@ -128,7 +158,7 @@ mod tests {
 
     #[test]
     fn selected_none_when_no_candidates_and_no_match() {
-        let mut app = new(Store::default());
+        let mut app = new(Store::default(), false);
         app.aliases.clear();
         assert_eq!(selected(&app), None);
     }
