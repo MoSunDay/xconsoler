@@ -1,0 +1,20 @@
+[package]
+name = "xconsoler"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "xconsoler"
+path = "src/lib.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+dirs = "5"
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
