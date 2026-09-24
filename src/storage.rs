@@ -49,14 +49,23 @@ impl HistoryEntry {
 pub struct Config {
     /// Wake-key spec string (`keyspec::DEFAULT_SPEC` when absent).
     pub wake_key: String,
+    /// Command-palette key spec (`keyspec::DEFAULT_COMMAND_SPEC` when absent).
+    #[serde(default = "default_command_key")]
+    pub command_key: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             wake_key: keyspec::DEFAULT_SPEC.to_string(),
+            command_key: default_command_key(),
         }
     }
+}
+
+/// Serde default for [`Config::command_key`]: the wake key's own default.
+fn default_command_key() -> String {
+    keyspec::DEFAULT_COMMAND_SPEC.to_string()
 }
 
 /// Persisted state. `aliases` holds user-defined aliases only; built-ins are
@@ -76,6 +85,14 @@ pub struct Store {
 pub fn set_wake_key(store: &mut Store, spec: &str) -> Result<(), String> {
     let parsed = keyspec::parse(spec)?;
     store.config.wake_key = keyspec::describe(&parsed);
+    Ok(())
+}
+
+/// Validate a command-palette key spec and persist its canonical form
+/// (`keyspec::describe`) into the store.
+pub fn set_command_key(store: &mut Store, spec: &str) -> Result<(), String> {
+    let parsed = keyspec::parse(spec)?;
+    store.config.command_key = keyspec::describe(&parsed);
     Ok(())
 }
 
@@ -245,17 +262,17 @@ mod tests {
 
     #[test]
     fn merge_overrides_builtin_and_appends_new() {
-        let over = user_def("browser", Some("echo replaced"));
+        let over = user_def("br", Some("echo replaced"));
         let extra = user_def("mine", Some("echo hi"));
         let merged = merge_aliases(&[over, extra]);
 
         assert_eq!(merged.len(), alias::defaults().len() + 1);
-        let browser = merged.iter().find(|d| d.name == "browser").unwrap();
-        assert_eq!(browser.linux.as_deref(), Some("echo replaced"));
-        assert!(!browser.builtin);
+        let br = merged.iter().find(|d| d.name == "br").unwrap();
+        assert_eq!(br.linux.as_deref(), Some("echo replaced"));
+        assert!(!br.builtin);
         // built-in order is preserved, user additions go last
-        assert_eq!(merged[0].name, "browser");
-        assert_eq!(merged[1].name, "clipboard");
+        assert_eq!(merged[0].name, "br");
+        assert_eq!(merged[1].name, "cd");
         assert_eq!(merged.last().unwrap().name, "mine");
     }
 
@@ -278,6 +295,42 @@ mod tests {
     #[test]
     fn default_store_has_default_wake_key() {
         assert_eq!(Store::default().config.wake_key, "alt+d");
+    }
+
+    #[test]
+    fn default_config_has_both_keys() {
+        let config = Config::default();
+        assert_eq!(config.wake_key, "alt+d");
+        assert_eq!(config.command_key, "alt+d");
+        assert_eq!(Store::default().config, config);
+    }
+
+    #[test]
+    fn config_without_command_key_gets_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.json");
+        let old = serde_json::json!({
+            "config": { "wake_key": "ctrl+g" },
+            "aliases": [],
+            "history": []
+        });
+        fs::write(&path, old.to_string()).unwrap();
+
+        let store = load(&path);
+        assert_eq!(store.config.wake_key, "ctrl+g");
+        assert_eq!(store.config.command_key, "alt+d");
+    }
+
+    #[test]
+    fn store_json_without_config_gets_both_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.json");
+        let old = serde_json::json!({ "aliases": [], "history": [] });
+        fs::write(&path, old.to_string()).unwrap();
+
+        let store = load(&path);
+        assert_eq!(store.config.wake_key, "alt+d");
+        assert_eq!(store.config.command_key, "alt+d");
     }
 
     #[test]
@@ -304,5 +357,21 @@ mod tests {
         let loaded = load(&path);
         assert_eq!(loaded.config.wake_key, "alt+j");
         assert_eq!(loaded.config, store.config);
+    }
+
+    #[test]
+    fn set_command_key_validates_and_normalizes() {
+        let mut store = Store::default();
+        assert!(set_command_key(&mut store, " ctrl+O ").is_ok());
+        assert_eq!(store.config.command_key, "ctrl+o");
+        assert!(set_command_key(&mut store, "alt+J").is_ok());
+        assert_eq!(store.config.command_key, "alt+j");
+        // command-key writes leave the wake key alone
+        assert_eq!(store.config.wake_key, "alt+d");
+        let err = set_command_key(&mut store, "garbage").unwrap_err();
+        assert!(err.contains("expected \"alt+<c>\" or \"ctrl+<c>\""));
+        assert!(set_command_key(&mut store, "alt+ctrl+x").is_err());
+        // rejected specs leave the previous value in place
+        assert_eq!(store.config.command_key, "alt+j");
     }
 }

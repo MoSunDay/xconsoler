@@ -29,20 +29,32 @@ pub struct AliasDef {
     pub builtin: bool,
 }
 
-/// Built-in aliases shipped with xconsoler.
+/// Built-in aliases shipped with xconsoler: exactly `br` and `cd`, each an
+/// alias, each carrying its concrete content - the command templates *and*
+/// the registered named args - so a fresh machine gets a working `br baidu`
+/// without any store copy.
 pub fn defaults() -> Vec<AliasDef> {
     vec![
         AliasDef {
-            name: "browser".to_string(),
-            shortcuts: vec!["br".to_string()],
-            linux: Some("xdg-open {input} >/dev/null 2>&1".to_string()),
-            macos: Some("open {input}".to_string()),
-            args: BTreeMap::new(),
+            name: "br".to_string(),
+            shortcuts: vec![],
+            // Native launchers, quiet and backgrounded: stray stdout/stderr
+            // would scribble over the TUI, and `&` returns the bar at once
+            // instead of waiting on the launcher (minutes on some boxes).
+            linux: Some("xdg-open {input} >/dev/null 2>&1 &".to_string()),
+            macos: Some("open {input} >/dev/null 2>&1 &".to_string()),
+            // Concrete registered content, not an empty shell: `br baidu` /
+            // `br gm` resolve to these urls before the command runs
+            // (see `crate::exec::resolve_args`).
+            args: BTreeMap::from([
+                ("baidu".to_string(), "https://www.baidu.com".to_string()),
+                ("gm".to_string(), "https://mail.google.com".to_string()),
+            ]),
             builtin: true,
         },
         AliasDef {
-            name: "clipboard".to_string(),
-            shortcuts: vec!["cd".to_string()],
+            name: "cd".to_string(),
+            shortcuts: vec![],
             // Native backend: no xclip/wl-copy/xsel/pbcopy dependency.
             linux: Some(crate::clipboard::TEMPLATE.to_string()),
             macos: Some(crate::clipboard::TEMPLATE.to_string()),
@@ -60,7 +72,7 @@ pub fn resolve<'a>(defs: &'a [AliasDef], token: &str) -> Option<&'a AliasDef> {
     })
 }
 
-/// Human label such as `browser (br)`; just the name when no shortcut exists.
+/// Human label such as `t (tt)`; just the name when no shortcut exists.
 pub fn label(def: &AliasDef) -> String {
     if def.shortcuts.is_empty() {
         def.name.clone()
@@ -254,7 +266,7 @@ fn cmd_or_none(joined: &str) -> Option<String> {
 
 /// Set (or replace) named argument `key` on user alias `name` inside the
 /// persisted alias list. A built-in name is materialized as an overriding
-/// user definition first — that is how `:arg browser k v` persists. Returns
+/// user definition first — that is how `:arg br k v` persists. Returns
 /// the previous value when the key already existed. `Err` for unknown names.
 pub fn set_arg(
     user: &mut Vec<AliasDef>,
@@ -286,6 +298,127 @@ pub fn remove_arg(user: &mut [AliasDef], name: &str, key: &str) -> Result<(), St
     }
 }
 
+/// Append shortcut `shortcut` to user alias `name`.
+///
+/// Follows [`set_arg`]: a built-in name is materialised into the user list
+/// first (clone of the default, `builtin = false`, registered args kept), so
+/// built-ins can gain quick-launch entries too. The shortcut must be a
+/// [`valid_ident`] and must not already resolve to a *different* alias -
+/// names and shortcuts collide case-insensitively, the way [`resolve`]
+/// matches them. `Ok(true)` when appended, `Ok(false)` when this alias
+/// already answers to that word, `Err` when the alias is unknown or its new
+/// word is malformed or taken.
+pub fn add_shortcut(user: &mut Vec<AliasDef>, name: &str, shortcut: &str) -> Result<bool, String> {
+    if !valid_ident(shortcut) {
+        return Err(format!("invalid shortcut: {shortcut}"));
+    }
+    // The alias must exist: a user def, or a built-in to materialise below.
+    if !user.iter().any(|d| d.name == name) && !defaults().iter().any(|d| d.name == name) {
+        return Err(format!("alias not found: {name}"));
+    }
+    // Collision check against the effective list (user defs shadow same-named
+    // built-ins). An error here must leave `user` untouched.
+    let effective = crate::storage::merge_aliases(user);
+    if let Some(other) = resolve(&effective, shortcut) {
+        if other.name.eq_ignore_ascii_case(name) {
+            return Ok(false); // this alias already answers to it
+        }
+        return Err(format!(
+            "shortcut \"{shortcut}\" already used by {}",
+            other.name
+        ));
+    }
+
+    // Materialise a built-in override, exactly like `set_arg` does.
+    let idx = match user.iter().position(|d| d.name == name) {
+        Some(i) => i,
+        None => match defaults().into_iter().find(|d| d.name == name) {
+            Some(mut def) => {
+                def.builtin = false;
+                user.push(def);
+                user.len() - 1
+            }
+            None => return Err(format!("alias not found: {name}")),
+        },
+    };
+    let def = &mut user[idx];
+    // `resolve` ignores case, so `Tt` on a `tt` shortcut is the same word.
+    if def
+        .shortcuts
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(shortcut))
+    {
+        return Ok(false);
+    }
+    def.shortcuts.push(shortcut.to_string());
+    Ok(true)
+}
+
+/// Remove shortcut `shortcut` from user alias `name`, case-insensitively.
+///
+/// Only the user list is scanned, like [`remove_arg`]: a built-in keeps its
+/// own fixed names until an override materialises it. `Ok(true)` when a
+/// shortcut was removed, `Ok(false)` when the alias or the shortcut is
+/// unknown to the user list.
+// `&mut Vec` (not `&mut [_]`) keeps the three editing helpers on one
+// signature; only `add_shortcut`/`set_commands` actually push.
+#[allow(clippy::ptr_arg)]
+pub fn remove_shortcut(
+    user: &mut Vec<AliasDef>,
+    name: &str,
+    shortcut: &str,
+) -> Result<bool, String> {
+    match user.iter_mut().find(|d| d.name == name) {
+        Some(def) => match def
+            .shortcuts
+            .iter()
+            .position(|s| s.eq_ignore_ascii_case(shortcut))
+        {
+            Some(i) => {
+                def.shortcuts.remove(i);
+                Ok(true)
+            }
+            None => Ok(false),
+        },
+        None => Ok(false),
+    }
+}
+
+/// Set the linux/macos command of user alias `name`.
+///
+/// A built-in name is materialised into the user list first (clone of the
+/// default, `builtin = false`, registered args kept). A blank `macos` mirrors
+/// `linux`, the same rule the settings wizard applies to single-platform
+/// aliases; both fields end up `Some(...)` so the run path always finds a
+/// command. `Err` only when the alias is unknown.
+pub fn set_commands(
+    user: &mut Vec<AliasDef>,
+    name: &str,
+    linux: &str,
+    macos: &str,
+) -> Result<(), String> {
+    let idx = match user.iter().position(|d| d.name == name) {
+        Some(i) => i,
+        None => match defaults().into_iter().find(|d| d.name == name) {
+            Some(mut def) => {
+                def.builtin = false;
+                user.push(def);
+                user.len() - 1
+            }
+            None => return Err(format!("alias not found: {name}")),
+        },
+    };
+    let macos = if macos.trim().is_empty() {
+        linux
+    } else {
+        macos
+    };
+    let def = &mut user[idx];
+    def.linux = Some(linux.to_string());
+    def.macos = Some(macos.to_string());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,36 +435,91 @@ mod tests {
     }
 
     #[test]
-    fn defaults_resolve_by_shortcut_and_name_any_case() {
+    fn defaults_have_no_shortcuts_and_resolve_by_name_any_case() {
         let defs = defaults();
-        let br = resolve(&defs, "br").expect("shortcut should resolve");
-        assert_eq!(br.name, "browser");
-        assert!(resolve(&defs, "BROWSER").is_some());
-        assert!(resolve(&defs, "Clipboard").is_some());
-        assert!(resolve(&defs, "CD").is_some());
+        assert_eq!(
+            defs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            vec!["br", "cd"],
+            "builtins are exactly br and cd"
+        );
+        assert!(defs.iter().all(|d| d.shortcuts.is_empty() && d.builtin));
+        let br = resolve(&defs, "br").expect("br resolves");
+        assert_eq!(br.name, "br");
+        assert!(resolve(&defs, "BR").is_some());
+        assert!(resolve(&defs, "Cd").is_some());
         assert!(resolve(&defs, "nope").is_none());
+        assert!(resolve(&defs, "browser").is_none());
+        assert!(resolve(&defs, "clipboard").is_none());
     }
 
     #[test]
-    fn clipboard_default_uses_native_backend() {
+    fn br_default_opens_quietly_in_the_background() {
+        let defs = defaults();
+        let br = resolve(&defs, "br").expect("br resolves");
+        assert_eq!(
+            br.linux.as_deref(),
+            Some("xdg-open {input} >/dev/null 2>&1 &"),
+            "linux opens through xdg-open, quiet and backgrounded"
+        );
+        assert_eq!(
+            br.macos.as_deref(),
+            Some("open {input} >/dev/null 2>&1 &"),
+            "macos opens through open, quiet and backgrounded"
+        );
+    }
+
+    #[test]
+    fn cd_default_uses_native_backend() {
         let defs = defaults();
         let cd = resolve(&defs, "cd").expect("cd resolves");
+        assert_eq!(cd.name, "cd");
         assert_eq!(cd.linux.as_deref(), Some(crate::clipboard::TEMPLATE));
         assert_eq!(cd.macos.as_deref(), Some(crate::clipboard::TEMPLATE));
         assert!(cd.builtin);
     }
 
     #[test]
-    fn labels_use_first_shortcut() {
+    fn builtins_carry_concrete_content_not_empty_shells() {
+        let defs = defaults();
+        let br = resolve(&defs, "br").expect("br resolves");
+        assert_eq!(
+            br.args.get("baidu").map(String::as_str),
+            Some("https://www.baidu.com")
+        );
+        assert_eq!(
+            br.args.get("gm").map(String::as_str),
+            Some("https://mail.google.com")
+        );
+        // The registered args are wired into the run path.
+        assert_eq!(
+            crate::exec::resolve_args(br, "baidu"),
+            "https://www.baidu.com"
+        );
+        assert_eq!(
+            crate::exec::resolve_args(br, "baidu ?q=1"),
+            "https://www.baidu.com ?q=1"
+        );
+        assert_eq!(
+            crate::exec::resolve_args(br, "https://x.dev"),
+            "https://x.dev"
+        );
+        let cd = resolve(&defs, "cd").expect("cd resolves");
+        assert!(cd.linux.as_deref().is_some_and(|c| !c.trim().is_empty()));
+        assert!(cd.macos.as_deref().is_some_and(|c| !c.trim().is_empty()));
+        assert!(defs.iter().all(|d| d.builtin && !d.name.is_empty()));
+    }
+
+    #[test]
+    fn labels_use_first_shortcut_when_present() {
         let defs = defaults();
         let br = resolve(&defs, "br").unwrap();
-        assert_eq!(label(br), "browser (br)");
+        assert_eq!(label(br), "br");
         assert_eq!(entry_label(br), "br");
 
         let mut d = br.clone();
-        d.shortcuts.clear();
-        assert_eq!(label(&d), "browser");
-        assert_eq!(entry_label(&d), "browser");
+        d.shortcuts = vec!["b".to_string()];
+        assert_eq!(label(&d), "br (b)");
+        assert_eq!(entry_label(&d), "b");
     }
 
     #[test]
@@ -377,8 +565,8 @@ mod tests {
 
     #[test]
     fn parse_del() {
-        match parse_colon_cmd("del browser").unwrap().unwrap() {
-            AliasOp::Remove(name) => assert_eq!(name, "browser"),
+        match parse_colon_cmd("del t").unwrap().unwrap() {
+            AliasOp::Remove(name) => assert_eq!(name, "t"),
             other => panic!("expected Remove, got {other:?}"),
         }
         assert!(parse_colon_cmd("del").is_err());
@@ -395,7 +583,10 @@ mod tests {
 
     #[test]
     fn parse_arg_keeps_value_spacing() {
-        match parse_colon_cmd("arg br baidu https://www.baidu.com").unwrap().unwrap() {
+        match parse_colon_cmd("arg br baidu https://www.baidu.com")
+            .unwrap()
+            .unwrap()
+        {
             AliasOp::SetArg { name, key, value } => {
                 assert_eq!(name, "br");
                 assert_eq!(key, "baidu");
@@ -404,7 +595,10 @@ mod tests {
             other => panic!("expected SetArg, got {other:?}"),
         }
         // the value is the raw remainder: internal spacing survives
-        match parse_colon_cmd("arg  t   here   cd /tmp  &&   ls ").unwrap().unwrap() {
+        match parse_colon_cmd("arg  t   here   cd /tmp  &&   ls ")
+            .unwrap()
+            .unwrap()
+        {
             AliasOp::SetArg { value, .. } => assert_eq!(value, "cd /tmp  &&   ls"),
             other => panic!("expected SetArg, got {other:?}"),
         }
@@ -434,8 +628,14 @@ mod tests {
     fn set_arg_on_user_alias_and_replacement() {
         let mut user = vec![user_def("t", Some("echo {input}"))];
         assert_eq!(set_arg(&mut user, "t", "here", "cd /tmp").unwrap(), None);
-        assert_eq!(set_arg(&mut user, "t", "here", "cd /var").unwrap(), Some("cd /tmp".into()));
-        assert_eq!(user[0].args.get("here").map(String::as_str), Some("cd /var"));
+        assert_eq!(
+            set_arg(&mut user, "t", "here", "cd /var").unwrap(),
+            Some("cd /tmp".into())
+        );
+        assert_eq!(
+            user[0].args.get("here").map(String::as_str),
+            Some("cd /var")
+        );
         assert_eq!(
             set_arg(&mut user, "nope", "k", "v").unwrap_err(),
             "alias not found: nope"
@@ -445,13 +645,28 @@ mod tests {
     #[test]
     fn set_arg_on_builtin_materializes_user_override() {
         let mut user = vec![];
-        assert_eq!(set_arg(&mut user, "browser", "baidu", "https://www.baidu.com").unwrap(), None);
+        // A new key on a builtin materializes a user override that keeps the
+        // builtin's own registered content (br ships with baidu/gm already).
+        assert_eq!(
+            set_arg(&mut user, "br", "gh", "https://github.com").unwrap(),
+            None
+        );
         assert_eq!(user.len(), 1);
         assert!(!user[0].builtin, "override must be a plain user def");
         assert!(user[0].linux.is_some(), "override keeps the command");
         assert_eq!(
+            user[0].args.get("gh").map(String::as_str),
+            Some("https://github.com")
+        );
+        assert_eq!(
             user[0].args.get("baidu").map(String::as_str),
-            Some("https://www.baidu.com")
+            Some("https://www.baidu.com"),
+            "builtin args carry over into the override"
+        );
+        // Re-registering an existing key reports the previous value.
+        assert_eq!(
+            set_arg(&mut user, "br", "gh", "https://gitlab.com").unwrap(),
+            Some("https://github.com".to_string())
         );
     }
 
@@ -469,6 +684,104 @@ mod tests {
             remove_arg(&mut user, "ghost", "here").unwrap_err(),
             "alias not found: ghost"
         );
+    }
+
+    #[test]
+    fn add_shortcut_on_user_alias_is_idempotent() {
+        let mut user = vec![user_def("t", Some("echo {input}"))];
+        assert!(add_shortcut(&mut user, "t", "tt").unwrap());
+        assert_eq!(user[0].shortcuts, vec!["tt".to_string()]);
+        // Case-insensitive: the alias already answers to "tt" (and to "t").
+        assert!(!add_shortcut(&mut user, "t", "TT").unwrap());
+        assert!(!add_shortcut(&mut user, "t", "T").unwrap());
+        assert_eq!(user[0].shortcuts, vec!["tt".to_string()]);
+
+        let err = add_shortcut(&mut user, "ghost", "g").unwrap_err();
+        assert_eq!(err, "alias not found: ghost");
+        assert_eq!(
+            add_shortcut(&mut user, "t", "bad!").unwrap_err(),
+            "invalid shortcut: bad!"
+        );
+        assert_eq!(user.len(), 1, "errors never touch the list");
+        assert_eq!(user[0].shortcuts, vec!["tt".to_string()]);
+    }
+
+    #[test]
+    fn add_shortcut_on_builtin_materializes_user_override() {
+        let mut user = vec![];
+        assert!(add_shortcut(&mut user, "br", "b").unwrap());
+        assert_eq!(user.len(), 1);
+        assert!(!user[0].builtin, "override must be a plain user def");
+        assert_eq!(user[0].shortcuts, vec!["b".to_string()]);
+        assert!(user[0].linux.is_some() && user[0].macos.is_some());
+        assert_eq!(
+            user[0].args.get("baidu").map(String::as_str),
+            Some("https://www.baidu.com")
+        );
+        // Already there: no duplicate, no second override.
+        assert!(!add_shortcut(&mut user, "br", "B").unwrap());
+        assert_eq!(user.len(), 1);
+        assert_eq!(user[0].shortcuts, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn add_shortcut_rejects_a_word_taken_by_another_alias() {
+        let mut user = vec![user_def("t", Some("echo {input}"))];
+        add_shortcut(&mut user, "t", "tt").unwrap();
+        user.push(user_def("u", Some("printf {input}")));
+
+        // "cd" is a built-in name, "tt" a shortcut of another user alias.
+        for taken in ["cd", "CD", "tt", "Tt"] {
+            let err = add_shortcut(&mut user, "u", taken).unwrap_err();
+            assert!(err.contains("already used"), "{err}");
+        }
+        assert!(user[1].shortcuts.is_empty(), "nothing was appended");
+    }
+
+    #[test]
+    fn remove_shortcut_only_scans_the_user_list() {
+        let mut user = vec![user_def("t", Some("echo {input}"))];
+        add_shortcut(&mut user, "t", "tt").unwrap();
+        add_shortcut(&mut user, "t", "t2").unwrap();
+        assert!(
+            remove_shortcut(&mut user, "t", "TT").unwrap(),
+            "case-insensitive"
+        );
+        assert_eq!(user[0].shortcuts, vec!["t2".to_string()], "one match goes");
+        assert!(remove_shortcut(&mut user, "t", "t2").unwrap());
+        assert!(user[0].shortcuts.is_empty());
+        // Unknown shortcut, unknown alias, and an un-materialised builtin all
+        // report "nothing removed" instead of an error.
+        assert!(!remove_shortcut(&mut user, "t", "tt").unwrap());
+        assert!(!remove_shortcut(&mut user, "ghost", "tt").unwrap());
+        assert!(!remove_shortcut(&mut user, "br", "b").unwrap());
+    }
+
+    #[test]
+    fn set_commands_mirrors_blank_macos() {
+        let mut user = vec![user_def("t", Some("echo {input}"))];
+        set_commands(&mut user, "t", "printf %s {input}", "").unwrap();
+        assert_eq!(user[0].linux.as_deref(), Some("printf %s {input}"));
+        assert_eq!(user[0].macos.as_deref(), Some("printf %s {input}"));
+        set_commands(&mut user, "t", "printf %s {input}", "   ").unwrap();
+        assert_eq!(user[0].macos.as_deref(), Some("printf %s {input}"));
+        set_commands(&mut user, "t", "xdg-open {input}", "open {input}").unwrap();
+        assert_eq!(user[0].linux.as_deref(), Some("xdg-open {input}"));
+        assert_eq!(user[0].macos.as_deref(), Some("open {input}"));
+        assert_eq!(user.len(), 1);
+    }
+
+    #[test]
+    fn set_commands_on_builtin_materializes_user_override() {
+        let mut user = vec![];
+        set_commands(&mut user, "br", "xdg-open {input}", "").unwrap();
+        assert_eq!(user.len(), 1);
+        assert!(!user[0].builtin, "override must be a plain user def");
+        assert_eq!(user[0].linux.as_deref(), Some("xdg-open {input}"));
+        assert_eq!(user[0].macos.as_deref(), Some("xdg-open {input}"));
+        assert_eq!(user[0].args.len(), 2, "registered args carry over");
+        let err = set_commands(&mut user, "ghost", "a", "b").unwrap_err();
+        assert_eq!(err, "alias not found: ghost");
     }
 
     #[test]

@@ -1,7 +1,27 @@
 #!/bin/sh
 # xconsoler long-bar toggle for the desktop (XFCE/X11):
-# running -> dismiss; not running -> summon a top-center bar terminal
-# (titled "xconsoler", 0.7-alpha background when gnome-terminal allows).
+# running -> dismiss; not running -> summon a frameless, titleless bar
+# terminal, a quarter of the screen wide and centred on the mouse cursor's
+# height (0.7-alpha background).
+#
+# Transparency: the host terminal does the blending (the TUI paints no
+# background of its own). "0.7 alpha" means 70% opaque, i.e. VTE
+# background-transparency-percent=30 -- 30% of the desktop shows through,
+# NOT 70%. Override with XC_ALPHA (0..1 opacity) or XC_TRANS (VTE
+# background-transparency-percent 0..100, wins over XC_ALPHA).
+#
+# No window header: gnome-terminal's client-side headerbar is a *global*
+# legacy setting (org.gnome.Terminal.Legacy.Settings headerbar), so it is
+# only written when not already false; with the headerbar off GTK falls
+# back to server-side decorations, which a detached xdotool watcher strips
+# with the classic motif hint (_MOTIF_WM_HINTS decorations=0). The watcher
+# is started before the terminal so the hint can land around the map: the
+# titlebar then never shows (no flash). xfwm4
+# matches the property *type* against the _MOTIF_WM_HINTS atom, so the
+# typed write below goes through python3/ctypes; the plain xprop call is
+# kept as a best effort for WMs that accept any type. Whatever tool is
+# missing, the bar is still summoned.
+#
 # Window/taskbar icon: run scripts/xc-icon once -- it installs the hicolor set
 # as "XConsoler", the WM_CLASS this script hands the terminal below.
 set -u
@@ -10,21 +30,101 @@ if pgrep -u "$UID_N" -f 'xconsoler --summon' >/dev/null 2>&1; then
     pkill -u "$UID_N" -f 'xconsoler --summon'
     exit 0
 fi
-# Screen width for centering (xrandr " connected" line, fallback 1920).
-SW=$(xrandr 2>/dev/null | awk '/ connected/ && !/disconnected/ {
-        if (match($0, /[0-9]+x[0-9]+\+/)) {
-            s = substr($0, RSTART, RLENGTH); sub(/x.*/, "", s); print s; exit
-        }}')
-[ -n "$SW" ] || SW=1920
-COLS=140; ROWS=14
-X=$(((SW - 1300) / 2)); [ "$X" -lt 0 ] && X=0
-GEOM="${COLS}x${ROWS}+${X}+48"
 
-# --- opaque bar profile (gnome-terminal) --------------------------------
-# Ensure a dedicated profile (visible-name "xconsoler"): opaque, with the
-# launcher palette pinned (no transparency). The profile uuid is generated
-# once and pinned in ~/.config/xconsoler/gt-profile; the ProfilesList entry
-# is idempotent.
+# Top edge for an H-pixel-high bar: centred on the pointer's height by
+# default, XC_Y pins a fixed offset instead (0 = screen top, the pre-
+# centering knob). Clamped so the whole bar stays on screen.
+target_top() {
+    if [ -n "${XC_Y:-}" ]; then
+        YC=$MOUSE_Y
+    else
+        YC=$((MOUSE_Y - $1 / 2))
+    fi
+    YC_MAX=$((SH - $1)); [ "$YC_MAX" -lt 0 ] && YC_MAX=0
+    [ "$YC" -lt 0 ] && YC=0
+    [ "$YC" -gt "$YC_MAX" ] && YC=$YC_MAX
+    printf '%s\n' "$YC"
+}
+
+# Screen metrics for the 25%-width bar (xrandr " connected" line, fallback
+# 1920x1080).
+RANDR=$(xrandr 2>/dev/null | awk '/ connected/ && !/disconnected/ {
+        if (match($0, /[0-9]+x[0-9]+\+/)) {
+            s = substr($0, RSTART, RLENGTH)
+            w = s; sub(/x.*/, "", w)
+            h = s; sub(/^[0-9]+x/, "", h); sub(/\+.*/, "", h)
+            print w, h; exit
+        }}')
+SW=${RANDR%% *}
+SH=${RANDR##* }
+case "${SW:-}" in '' | *[!0-9]*) SW=1920 ;; esac
+case "${SH:-}" in '' | *[!0-9]*) SH=1080 ;; esac
+# A quarter of the screen wide, centred, and its top edge follows the mouse
+# cursor's height by default: MOUSE_Y holds the pointer's middle line and
+# half the bar height is subtracted again by target_top (XC_Y pins a fixed
+# top edge instead). 48px is the fallback when xdotool is unavailable; a
+# negative Y (monitor arranged above the primary) clamps to 0.
+W_PX=$(awk -v sw="$SW" 'BEGIN { printf "%d", sw * 0.25 + 0.5 }')
+[ "$W_PX" -gt 0 ] || W_PX=480
+X=$(((SW - W_PX) / 2)); [ "$X" -lt 0 ] && X=0
+MOUSE_Y=''
+if [ -z "${XC_Y:-}" ] && command -v xdotool >/dev/null 2>&1; then
+    MOUSE_Y=$(xdotool getmouselocation --shell 2>/dev/null |
+        awk -F= '/^Y=/{print $2; exit}')
+fi
+[ -n "${XC_Y:-}" ] && MOUSE_Y=$XC_Y
+MOUSE_Y=$(printf '%s' "${MOUSE_Y:-}" | awk '/^-?[0-9]+$/ {print; exit}')
+[ -n "$MOUSE_Y" ] || MOUSE_Y=48
+# 16 rows: the 3-row input box, the candidate list's own border/title (2),
+# the 10 recent-history rows it shows by default, and the status row. Fewer
+# rows clamp the list (8 rows at XC_ROWS=14); /settings still draws its table
+# in place -- below ~8 rows that page has no room left. XC_ROWS overrides it
+# (say XC_ROWS=4 for a slim strip; the rows under the box then stay empty).
+case "${XC_ROWS:-}" in
+    '' | *[!0-9]* | 0) ROWS=16 ;;
+    *) ROWS=$XC_ROWS ;;
+esac
+# --geometry takes cells, so pixels are divided by the monospace advance
+# (9.3px is what the old 140-col / ~1300px layout assumed; XC_CELL_W tunes
+# it). The detached poll then re-applies the exact pixel box, so this is
+# only the first frame. XC_COLS pins a cell count instead -- 140 restores
+# the old wide bar /settings is happiest in -- and skips the pixel resize.
+CELL_W=${XC_CELL_W:-9.3}
+awk -v c="$CELL_W" 'BEGIN { exit !(c + 0 > 0) }' || CELL_W=9.3
+case "${XC_COLS:-}" in
+    '' | *[!0-9]* | 0)
+        COLS=$(awk -v w="$W_PX" -v c="$CELL_W" \
+            'BEGIN { n = int(w / c + 0.5); if (n < 20) n = 20; print n }')
+        RESIZE=1 ;;
+    *)
+        COLS=$XC_COLS
+        RESIZE='' ;;
+esac
+# Rows are about twice as tall as a monospace cell is wide; the estimate
+# centres the first frame on the mouse, and the watcher below corrects the
+# box once the window reports its real height.
+H_EST=$(awk -v r="$ROWS" -v c="$CELL_W" 'BEGIN { printf "%d", r * c * 2 + 0.5 }')
+Y=$(target_top "$H_EST")
+GEOM="${COLS}x${ROWS}+${X}+${Y}"
+
+# VTE transparency percent for the 0.7-alpha default (see header comment).
+TRANS=30
+if [ -n "${XC_TRANS:-}" ]; then
+    case "$XC_TRANS" in *[!0-9]*) ;; *) TRANS=$XC_TRANS ;; esac
+elif [ -n "${XC_ALPHA:-}" ]; then
+    case "$XC_ALPHA" in *[!0-9.]*) ;; *)
+        TRANS=$(awk -v a="$XC_ALPHA" 'BEGIN {
+            if (a < 0) a = 0; if (a > 1) a = 1
+            printf "%d", 100 * (1 - a) + 0.5 }') ;;
+    esac
+fi
+case "$TRANS" in '' | *[!0-9]*) TRANS=30 ;; esac
+[ "$TRANS" -gt 100 ] && TRANS=100
+
+# --- translucent bar profile (gnome-terminal) ---------------------------
+# Ensure a dedicated profile (visible-name "xconsoler"): 0.7-alpha, with
+# the launcher palette pinned. The profile uuid is generated once and pinned
+# in ~/.config/xconsoler/gt-profile; the ProfilesList entry is idempotent.
 CFG_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/xconsoler
 GT_PROFILE_FILE=$CFG_DIR/gt-profile
 GT_LIST_KEY=/org/gnome/terminal/legacy/profiles:/list
@@ -62,30 +162,169 @@ gt_ensure_profile() {
     fi
     PROF=$GT_PROFILE_BASE:$UUID/
     dconf write "${PROF}visible-name" "'xconsoler'" 2>/dev/null || return 1
-    dconf write "${PROF}use-transparent-background" false 2>/dev/null ||
-        return 1
-    dconf write "${PROF}background-transparency-percent" 0 2>/dev/null ||
+    dconf write "${PROF}use-transparent-background" true 2>/dev/null || return 1
+    # 0.7 alpha -> 30 (percent), see header comment.
+    dconf write "${PROF}background-transparency-percent" "$TRANS" 2>/dev/null ||
         return 1
     # VTE would otherwise inherit the GTK theme colours; pin the launcher
     # palette (#1f1f28 sumiInk0 / #dcdcdc fujiWhite, see src/theme.rs) so
-    # light text stays readable on the dark opaque bar.
+    # light text stays readable on the translucent bar.
     dconf write "${PROF}use-theme-colors" false 2>/dev/null || return 1
     dconf write "${PROF}background-color" "'#1f1f28'" 2>/dev/null || return 1
     dconf write "${PROF}foreground-color" "'#dcdcdc'" 2>/dev/null || return 1
     printf '%s\n' xconsoler
 }
 
+# gnome-terminal's headerbar is a global legacy setting (affects every
+# window on this machine), so only write it when not already false.
+gt_no_header() {
+    command -v gsettings >/dev/null 2>&1 || return 0
+    [ "$(gsettings get org.gnome.Terminal.Legacy.Settings headerbar \
+        2>/dev/null)" = false ] && return 0
+    gsettings set org.gnome.Terminal.Legacy.Settings headerbar false \
+        2>/dev/null ||
+        echo "xc-bar: cannot disable gnome-terminal headerbar" >&2
+}
+
+# Write _MOTIF_WM_HINTS with the property *type* also set to the
+# _MOTIF_WM_HINTS atom: flags=MWM_HINTS_DECORATIONS(2), decorations=0.
+# xfwm4 matches the type, so this typed write is what undecorates on Xfce;
+# other WMs are happy with xprop's CARDINAL-typed hint as well.
+motif_hint_typed() {
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 - "$1" <<'PY' 2>/dev/null
+import ctypes, ctypes.util, sys
+x11 = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+x11.XOpenDisplay.restype = ctypes.c_void_p
+x11.XInternAtom.restype = ctypes.c_ulong
+dpy = x11.XOpenDisplay(None)
+if not dpy:
+    raise SystemExit(0)
+atom = x11.XInternAtom(ctypes.c_void_p(dpy), b"_MOTIF_WM_HINTS", 0)
+hints = (ctypes.c_ulong * 5)(2, 0, 0, 0, 0)
+x11.XChangeProperty(ctypes.c_void_p(dpy), ctypes.c_ulong(int(sys.argv[1], 0)),
+                    ctypes.c_ulong(atom), ctypes.c_ulong(atom), 32, 0,
+                    ctypes.cast(hints, ctypes.c_void_p), 5)
+x11.XFlush(ctypes.c_void_p(dpy))
+PY
+}
+
+# Configure the window to its target pixel box: a quarter of the screen
+# wide (skipped when XC_COLS pinned a cell count) and centred on the mouse's
+# height (target_top). CHANGED counts the xdotool calls actually issued, so
+# the caller can tell "already in place" from "had to move": a redundant
+# move or resize repaints the bar. The window manager keeps the last word
+# though -- it may snap the box back to whole cells -- so placement gives up
+# after PLACE_TRIES calls instead of fighting it for a whole poll window.
+place_bar() {
+    WID=$1
+    CHANGED=0
+    GEO=$(xdotool getwindowgeometry --shell "$WID" 2>/dev/null)
+    W=$(printf '%s\n' "$GEO" | awk -F= '/^WIDTH=/{print $2; exit}')
+    H=$(printf '%s\n' "$GEO" | awk -F= '/^HEIGHT=/{print $2; exit}')
+    XW=$(printf '%s\n' "$GEO" | awk -F= '/^X=/{print $2; exit}')
+    YW=$(printf '%s\n' "$GEO" | awk -F= '/^Y=/{print $2; exit}')
+    case "${H:-}" in '' | *[!0-9]*) H=$H_EST ;; esac
+    # 1x1 means "not realised yet": keep the estimate, the loop below
+    # re-places the bar once the real geometry is there (until PLACE_TRIES).
+    [ "$H" -lt 10 ] && H=$H_EST
+    YC=$(target_top "$H")
+    if [ "$PLACE_TRIES" -lt 4 ]; then
+        if [ -n "$RESIZE" ] && [ -n "${W:-}" ] && [ "$W" != "$W_PX" ]; then
+            xdotool windowsize "$WID" "$W_PX" "$H" 2>/dev/null
+            CHANGED=$((CHANGED + 1))
+        fi
+        if [ "${XW:-}" != "$X" ] || [ "${YW:-}" != "$YC" ]; then
+            xdotool windowmove "$WID" "$X" "$YC" 2>/dev/null
+            CHANGED=$((CHANGED + 1))
+        fi
+        [ "$CHANGED" -gt 0 ] && PLACE_TRIES=$((PLACE_TRIES + 1))
+    fi
+}
+
+# Undecorate the summoned bar and hand it to place_bar: the classic motif
+# hint so the WM draws no titlebar, then the target pixel box.
+#
+# No titlebar flash: xfwm4 decorates a client when it maps it, so the hint
+# has to land before that map. This watcher therefore starts *before* the
+# terminal is spawned and matches unmapped windows too (no --onlyvisible),
+# sampling every 20ms for up to ~4s; the tail then re-asserts hint and box
+# in case the WM acted late. Detached, so ssh / keybinding callers never
+# block, and it exits early once the bar is mapped and has stayed put.
+strip_decorations() {
+    command -v xdotool >/dev/null 2>&1 && command -v xprop >/dev/null 2>&1 ||
+        return 0
+    WID=''
+    I=0
+    while [ -z "$WID" ] && [ "$I" -lt 200 ]; do
+        CAND=$(xdotool search --class XConsoler 2>/dev/null | tail -n 1)
+        # A just-killed previous bar may still be closing: skip its window.
+        case " $OLD_IDS " in
+            *" $CAND "*) ;;
+            *) [ -n "$CAND" ] && WID=$CAND ;;
+        esac
+        I=$((I + 1))
+        sleep 0.02
+    done
+    [ -n "$WID" ] || return 0
+    TYPED=0
+    PLACE_TRIES=0
+    GOOD=0
+    I=0
+    while [ "$I" -lt 150 ]; do
+        xprop -id "$WID" -f _MOTIF_WM_HINTS 32c \
+            -set _MOTIF_WM_HINTS "0x2, 0x0, 0x0, 0x0, 0x0" 2>/dev/null
+        EXTENTS=$(xprop -id "$WID" _NET_FRAME_EXTENTS 2>/dev/null |
+            sed 's/.*= //')
+        # xfwm4 matches the property type, so the typed write is the one
+        # that counts (see header): repeat it whenever the hint was lost.
+        if [ "$TYPED" -eq 0 ] || [ "$EXTENTS" != "0, 0, 0, 0" ]; then
+            motif_hint_typed "$WID"
+            TYPED=1
+        fi
+        place_bar "$WID"
+        MAPPED=$(xdotool search --onlyvisible --class XConsoler 2>/dev/null |
+            grep -cx "$WID")
+        if [ "$EXTENTS" = "0, 0, 0, 0" ] && [ "${MAPPED:-0}" -gt 0 ] &&
+            [ "$CHANGED" -eq 0 ]; then
+            GOOD=$((GOOD + 1))
+        else
+            GOOD=0
+        fi
+        [ "$GOOD" -ge 3 ] && return 0
+        I=$((I + 1))
+        SLEEP=0.4
+        [ "$I" -lt 75 ] && SLEEP=0.02
+        sleep "$SLEEP"
+    done
+}
+
+# Resolve the binary up front: gnome-terminal-server can run with a stripped
+# environment (no PATH), where a bare `xconsoler` would not be found.
+XC_BIN=$(command -v xconsoler 2>/dev/null || true)
+[ -n "$XC_BIN" ] || XC_BIN=/usr/local/bin/xconsoler
+
 # --- summon --------------------------------------------------------------
+# Window ids on screen before this run: a bar that is still closing must
+# not be mistaken for the window summoned below. The watcher goes first so
+# it is already polling when the terminal appears -- that is what lets the
+# decoration hint land around the map and keeps the titlebar off screen.
+OLD_IDS=$(command -v xdotool >/dev/null 2>&1 &&
+    xdotool search --class XConsoler 2>/dev/null | tr '\n' ' ')
+strip_decorations </dev/null >/dev/null 2>&1 &
 if command -v gnome-terminal >/dev/null 2>&1; then
+    gt_no_header
     PROFILE=$(gt_ensure_profile) || PROFILE=''
     [ -n "$PROFILE" ] ||
         echo "xc-bar: launcher profile unavailable, using default colours" >&2
-    set -- gnome-terminal --class=XConsoler --hide-menubar --title=xconsoler \
+    set -- gnome-terminal --class=XConsoler --hide-menubar --title=' ' \
         --geometry="$GEOM"
     [ -n "$PROFILE" ] && set -- "$@" --window-with-profile="$PROFILE"
-    set -- "$@" -- xconsoler --summon
+    set -- "$@" -- "$XC_BIN" --summon
     # Fully detached so ssh / keybinding callers never block on the terminal.
     "$@" </dev/null >/dev/null 2>&1 &
 else
-    exec xterm -class XConsoler -geometry "$GEOM" -e xconsoler --summon
+    xterm -class XConsoler -T ' ' -geometry "$GEOM" -e "$XC_BIN" --summon \
+        </dev/null >/dev/null 2>&1 &
 fi
+exit 0

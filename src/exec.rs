@@ -17,6 +17,32 @@ pub enum ExecOutcome {
 
 const STDIN_MARKER: &str = "@stdin";
 const INPUT_PLACEHOLDER: &str = "{input}";
+/// Grace period the background probe allows a launched program to either stay
+/// alive or die visibly.
+const BG_GRACE_SECS: &str = "0.2";
+
+/// True when a template backgrounds its own work, i.e. ends in a single `&`
+/// (`&&` is a shell operator, not a backgrounded job).
+fn backgrounds(template: &str) -> bool {
+    let t = template.trim_end();
+    t.ends_with('&') && !t.ends_with("&&")
+}
+
+/// Probe appended to a backgrounding template. Without it `sh` exits 0 the
+/// instant the job is forked, so a launch that dies at once (missing binary,
+/// bad argument) still looked like a success and entered the history. `$!` is
+/// the job's pid: an empty one means the template backgrounded nothing (a plain
+/// success), a pid still alive after the grace period means the program started
+/// (also a success, and the job stays detached), and a pid that is already gone
+/// is reaped for its real exit status.
+fn bg_probe(grace: &str) -> String {
+    // The `\`-continuations below eat the newline and the next line's leading
+    // whitespace, so the produced command keeps exactly one space per gap.
+    format!(
+        "p=$!; if [ -z \"$p\" ]; then exit 0; fi; sleep {grace}; \
+         if kill -0 \"$p\" 2>/dev/null; then exit 0; fi; wait \"$p\"; exit $?"
+    )
+}
 
 /// Quote a string into a single safe shell word using POSIX single quotes:
 /// inner single quotes are rewritten as `'\''`.
@@ -70,7 +96,9 @@ pub fn resolve_args(def: &AliasDef, rest: &str) -> String {
 ///
 /// Template handling:
 ///
-/// 1. missing command for the platform -> `Failure`
+/// 1. missing (or blank) command for the current platform -> the other
+///    platform's command is used when it is present; only both missing is a
+///    `Failure("no command configured for <platform>")`
 /// 2. `@stdin` stripped from the command; input is written to child stdin
 /// 3. `{input}` replaced with `shell_quote(input)`; empty (whitespace-only)
 ///    input -> `Failure("input required")`
@@ -78,12 +106,16 @@ pub fn resolve_args(def: &AliasDef, rest: &str) -> String {
 /// stdout is piped and discarded on success so the TUI stays clean; stderr
 /// (tail) and the exit code are reported on failure.
 pub fn run_alias(def: &AliasDef, input: &str, platform: Platform) -> ExecOutcome {
-    let template = match platform {
-        Platform::Linux => def.linux.as_deref(),
-        Platform::Macos => def.macos.as_deref(),
+    let (primary, fallback) = match platform {
+        Platform::Linux => (def.linux.as_deref(), def.macos.as_deref()),
+        Platform::Macos => (def.macos.as_deref(), def.linux.as_deref()),
     };
-    let template = match template {
-        Some(t) if !t.trim().is_empty() => t,
+    let template = match (primary, fallback) {
+        (Some(t), _) if !t.trim().is_empty() => t,
+        // Single-command aliases (":add t <cmd>", the settings wizard's empty
+        // macos answer) must run on both platforms, not just the one they
+        // were written for.
+        (_, Some(t)) if !t.trim().is_empty() => t,
         _ => {
             return ExecOutcome::Failure(format!(
                 "no command configured for {}",
@@ -114,6 +146,11 @@ pub fn run_alias(def: &AliasDef, input: &str, platform: Platform) -> ExecOutcome
             return ExecOutcome::Failure("input required".to_string());
         }
         cmd = cmd.replace(INPUT_PLACEHOLDER, &shell_quote(input));
+    }
+
+    if backgrounds(&cmd) {
+        cmd.push(' ');
+        cmd.push_str(&bg_probe(BG_GRACE_SECS));
     }
 
     let mut child = match Command::new("sh")
@@ -201,11 +238,7 @@ mod tests {
         assert_eq!(shell_quote("a b'c"), "'a b'\\''c'");
     }
 
-    fn def_with_args(
-        name: &str,
-        linux: &str,
-        args: &[(&str, &str)],
-    ) -> AliasDef {
+    fn def_with_args(name: &str, linux: &str, args: &[(&str, &str)]) -> AliasDef {
         let mut d = def(name, linux);
         for (k, v) in args {
             d.args.insert(k.to_string(), v.to_string());
@@ -222,7 +255,11 @@ mod tests {
 
     #[test]
     fn resolve_args_replaces_matching_key() {
-        let d = def_with_args("br", "xdg-open {input}", &[("baidu", "https://www.baidu.com")]);
+        let d = def_with_args(
+            "br",
+            "xdg-open {input}",
+            &[("baidu", "https://www.baidu.com")],
+        );
         assert_eq!(resolve_args(&d, "baidu"), "https://www.baidu.com");
         // surrounding whitespace is trimmed before the lookup
         assert_eq!(resolve_args(&d, "   baidu   "), "https://www.baidu.com");
@@ -230,7 +267,11 @@ mod tests {
 
     #[test]
     fn resolve_args_appends_remaining_tokens_after_value() {
-        let d = def_with_args("br", "xdg-open {input}", &[("baidu", "https://www.baidu.com")]);
+        let d = def_with_args(
+            "br",
+            "xdg-open {input}",
+            &[("baidu", "https://www.baidu.com")],
+        );
         assert_eq!(
             resolve_args(&d, "baidu extra tokens"),
             "https://www.baidu.com extra tokens"
@@ -239,13 +280,21 @@ mod tests {
 
     #[test]
     fn resolve_args_keeps_unmatched_first_token() {
-        let d = def_with_args("br", "xdg-open {input}", &[("baidu", "https://www.baidu.com")]);
+        let d = def_with_args(
+            "br",
+            "xdg-open {input}",
+            &[("baidu", "https://www.baidu.com")],
+        );
         assert_eq!(resolve_args(&d, "google.com search"), "google.com search");
     }
 
     #[test]
     fn resolve_args_empty_rest_stays_empty() {
-        let d = def_with_args("br", "xdg-open {input}", &[("baidu", "https://www.baidu.com")]);
+        let d = def_with_args(
+            "br",
+            "xdg-open {input}",
+            &[("baidu", "https://www.baidu.com")],
+        );
         assert_eq!(resolve_args(&d, ""), "");
         assert_eq!(resolve_args(&d, "   "), "");
     }
@@ -265,23 +314,74 @@ mod tests {
     }
 
     #[test]
-    fn missing_platform_command_fails() {
-        match run_alias(&def("browser", "xdg-open {input}"), "x", Platform::Macos) {
+    fn missing_platform_command_falls_back_to_the_other_platform() {
+        // macOS without a macos command: the linux one serves both.
+        match run_alias(&def("browser", "printf %s {input}"), "x", Platform::Macos) {
+            ExecOutcome::Success(msg) => assert_eq!(msg, "browser ok"),
+            ExecOutcome::Failure(msg) => panic!("expected the linux fallback to run: {msg}"),
+        }
+        // ... and the same the other way round.
+        let macos_only = AliasDef {
+            name: "browser".to_string(),
+            shortcuts: vec![],
+            linux: None,
+            macos: Some("printf %s {input}".to_string()),
+            args: BTreeMap::new(),
+            builtin: false,
+        };
+        assert_eq!(
+            run_alias(&macos_only, "x", Platform::Linux),
+            ExecOutcome::Success("browser ok".to_string())
+        );
+        // A blank field counts as missing, not as a command.
+        let blank_linux = AliasDef {
+            name: "blank".to_string(),
+            shortcuts: vec![],
+            linux: Some("   ".to_string()),
+            macos: Some("printf %s {input}".to_string()),
+            args: BTreeMap::new(),
+            builtin: false,
+        };
+        assert_eq!(
+            run_alias(&blank_linux, "x", Platform::Linux),
+            ExecOutcome::Success("blank ok".to_string())
+        );
+    }
+
+    #[test]
+    fn missing_commands_on_both_platforms_fail() {
+        let none = AliasDef {
+            name: "e".to_string(),
+            shortcuts: vec![],
+            linux: None,
+            macos: None,
+            args: BTreeMap::new(),
+            builtin: false,
+        };
+        match run_alias(&none, "x", Platform::Linux) {
+            ExecOutcome::Failure(msg) => {
+                assert!(msg.contains("no command configured for linux"), "{msg}")
+            }
+            ExecOutcome::Success(_) => panic!("expected failure"),
+        }
+        match run_alias(&none, "x", Platform::Macos) {
             ExecOutcome::Failure(msg) => {
                 assert!(msg.contains("no command configured for macos"), "{msg}")
             }
             ExecOutcome::Success(_) => panic!("expected failure"),
         }
-        let empty = AliasDef {
-            name: "e".to_string(),
-            shortcuts: vec![],
+        // Blank on both sides is just as missing.
+        let blank = AliasDef {
             linux: Some("   ".to_string()),
-            macos: None,
-            args: BTreeMap::new(),
-            builtin: false,
+            macos: Some(String::new()),
+            ..none
         };
         assert!(matches!(
-            run_alias(&empty, "x", Platform::Linux),
+            run_alias(&blank, "x", Platform::Linux),
+            ExecOutcome::Failure(_)
+        ));
+        assert!(matches!(
+            run_alias(&blank, "x", Platform::Macos),
             ExecOutcome::Failure(_)
         ));
     }
@@ -354,5 +454,89 @@ mod tests {
         let own_pgid = String::from_utf8_lossy(&own.stdout).trim().to_string();
         assert!(!child_pgid.is_empty());
         assert_ne!(child_pgid, own_pgid, "child must leave the bar's group");
+    }
+
+    #[test]
+    fn backgrounds_only_accepts_a_single_trailing_ampersand() {
+        assert!(backgrounds("firefox {input} &"));
+        assert!(backgrounds("firefox {input} >/dev/null 2>&1 &  "));
+        assert!(!backgrounds("firefox {input}"));
+        assert!(!backgrounds("test -n {input} && firefox"));
+        assert!(!backgrounds("echo \"a &\""));
+    }
+
+    #[test]
+    fn the_probe_command_has_no_stray_whitespace() {
+        let probe = bg_probe("0.2");
+        let expected = concat!(
+            "p=$!; if [ -z \"$p\" ]; then exit 0; fi; sleep 0.2; ",
+            "if kill -0 \"$p\" 2>/dev/null; then exit 0; fi; ",
+            "wait \"$p\"; exit $?"
+        );
+        assert_eq!(probe, expected);
+        assert!(!probe.contains("  "), "stray double space in {probe:?}");
+    }
+
+    #[test]
+    fn the_probe_reports_the_real_status_of_a_fast_background_failure() {
+        // The job dies with a real non-zero code inside the grace period, so
+        // the probe must reap and report that code, not a generic one.
+        let d = def("bg", "false >/dev/null 2>&1 &");
+        match run_alias(&d, "", Platform::Linux) {
+            ExecOutcome::Failure(msg) => assert!(msg.contains("exit 1"), "{msg}"),
+            ExecOutcome::Success(out) => panic!("must report exit 1, got {out:?}"),
+        }
+    }
+
+    #[test]
+    fn the_probe_treats_an_empty_job_pid_as_success() {
+        // `\&` is a literal ampersand, so the shell backgrounds nothing and
+        // leaves `$!` empty -- the `[ -z "$p" ]` branch must call that a
+        // success instead of failing on a `wait` without a pid.
+        let template = "echo a \\&";
+        assert!(backgrounds(template), "the probe must be appended");
+        match run_alias(&def("bg", template), "", Platform::Linux) {
+            ExecOutcome::Success(msg) => assert_eq!(msg, "bg ok"),
+            ExecOutcome::Failure(msg) => panic!("expected success, got {msg}"),
+        }
+    }
+
+    #[test]
+    fn the_probe_reports_a_backgrounded_launch_that_dies_at_once() {
+        let d = def("bg", "nosuchbin_xconsoler_probe {input} >/dev/null 2>&1 &");
+        match run_alias(&d, "x", Platform::Linux) {
+            ExecOutcome::Failure(msg) => assert!(msg.contains("127"), "{msg}"),
+            ExecOutcome::Success(out) => panic!("must fail, got {out:?}"),
+        }
+    }
+
+    #[test]
+    fn the_probe_accepts_a_backgrounded_launch_that_starts() {
+        let d = def("bg", "sleep 3 >/dev/null 2>&1 &");
+        assert!(matches!(
+            run_alias(&d, "", Platform::Linux),
+            ExecOutcome::Success(_)
+        ));
+    }
+
+    #[test]
+    fn the_probe_accepts_a_fast_backgrounded_success() {
+        let d = def("bg", "true >/dev/null 2>&1 &");
+        assert!(matches!(
+            run_alias(&d, "", Platform::Linux),
+            ExecOutcome::Success(_)
+        ));
+    }
+
+    #[test]
+    fn the_probe_does_not_wait_for_the_program_to_finish() {
+        let d = def("bg", "sleep 5 >/dev/null 2>&1 &");
+        let t0 = std::time::Instant::now();
+        run_alias(&d, "", Platform::Linux);
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "the bar blocked for {elapsed:?}"
+        );
     }
 }

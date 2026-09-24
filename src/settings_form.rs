@@ -1,9 +1,9 @@
 //! Wizard form for the `/settings` page: collects a new alias (name →
-//! shortcuts → linux command → macos command) or a new named argument
-//! (key → value) from a single bottom input line, validating each field on
-//! Enter before advancing. Pure data + free functions; the store is only
-//! read (duplicate-name checks) — submissions are applied by
-//! [`crate::settings`].
+//! shortcuts → linux command → macos command), a new shortcut, an edit of an
+//! alias's linux/macos commands, or a new named argument (key → value) from a
+//! single bottom input line, validating each field on Enter before advancing.
+//! Pure data + free functions; the store is only read (duplicate-name checks)
+//! — submissions are applied by [`crate::settings`] / [`crate::settings_apply`].
 
 use std::collections::BTreeMap;
 
@@ -16,14 +16,39 @@ use crate::storage::Store;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Purpose {
     NewAlias,
-    NewArg { alias: String },
+    NewArg {
+        alias: String,
+    },
+    /// One quick-launch shortcut added to an existing alias.
+    NewShortcut {
+        alias: String,
+    },
+    /// Rewrite an existing alias's linux/macos commands (both prefilled).
+    EditCommand {
+        alias: String,
+    },
 }
 
 /// A finished wizard run, ready to be applied to the store.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Submission {
     Alias(AliasDef),
-    Arg { alias: String, key: String, value: String },
+    Arg {
+        alias: String,
+        key: String,
+        value: String,
+    },
+    /// Applied by `alias::add_shortcut` through the settings effect path.
+    Shortcut {
+        alias: String,
+        shortcut: String,
+    },
+    /// Applied by `alias::set_commands` (blank macos mirrors linux).
+    Commands {
+        alias: String,
+        linux: String,
+        macos: String,
+    },
 }
 
 /// Form state: answers before `step` are final, `input` is the field being
@@ -34,6 +59,7 @@ pub struct Form {
     pub step: usize,
     pub name: String,
     pub shortcuts: String,
+    pub shortcut: String,
     pub linux: String,
     pub macos: String,
     pub arg_key: String,
@@ -62,6 +88,7 @@ pub fn new_alias() -> Form {
         step: 0,
         name: String::new(),
         shortcuts: String::new(),
+        shortcut: String::new(),
         linux: String::new(),
         macos: String::new(),
         arg_key: String::new(),
@@ -82,11 +109,41 @@ pub fn new_arg(alias: &str) -> Form {
     }
 }
 
+/// Start the add-shortcut wizard for `alias` (single step).
+pub fn new_shortcut(alias: &str) -> Form {
+    Form {
+        purpose: Purpose::NewShortcut {
+            alias: alias.to_string(),
+        },
+        step: 0,
+        ..new_alias()
+    }
+}
+
+/// Start the edit-commands wizard for `alias`: both steps are prefilled with
+/// the alias's current commands so Enter can be pressed straight through.
+/// `None` commands prefill empty (an empty macos answer mirrors linux).
+pub fn new_edit_command(alias: &str, linux: Option<&str>, macos: Option<&str>) -> Form {
+    let linux = linux.unwrap_or_default().to_string();
+    Form {
+        purpose: Purpose::EditCommand {
+            alias: alias.to_string(),
+        },
+        step: 0,
+        input: linux.clone(),
+        linux,
+        macos: macos.unwrap_or_default().to_string(),
+        ..new_alias()
+    }
+}
+
 /// Number of wizard steps for the form's purpose.
 pub fn step_count(f: &Form) -> usize {
     match f.purpose {
         Purpose::NewAlias => 4,
         Purpose::NewArg { .. } => 2,
+        Purpose::NewShortcut { .. } => 1,
+        Purpose::EditCommand { .. } => 2,
     }
 }
 
@@ -132,14 +189,24 @@ fn advance(f: &Form, store: &Store) -> (Form, FormOutcome) {
             next.error = None;
             let value = next.input.clone();
             store_field(&mut next, &value);
-            next.input.clear();
             next.step += 1;
+            // Some steps start prefilled: Enter accepts the current text,
+            // Ctrl+U clears it (edit-command's macos step).
+            next.input = prefill(&next);
             if next.step >= step_count(f) {
                 (next.clone(), FormOutcome::Submit(build_submission(&next)))
             } else {
                 (next, FormOutcome::Active)
             }
         }
+    }
+}
+
+/// Initial text of the step just started.
+fn prefill(f: &Form) -> String {
+    match (&f.purpose, f.step) {
+        (Purpose::EditCommand { .. }, 1) => f.macos.clone(),
+        _ => String::new(),
     }
 }
 
@@ -179,6 +246,25 @@ fn validate_step(f: &Form, store: &Store) -> Result<(), String> {
             }
         }
         (Purpose::NewAlias, 3) => Ok(()), // empty = same as linux
+        // One word, must be a valid identifier; collisions are reported by
+        // `alias::add_shortcut` (surfaced on the list's status line).
+        (Purpose::NewShortcut { .. }, 0) => {
+            if value.is_empty() {
+                Err("shortcut cannot be empty".to_string())
+            } else if !alias::valid_ident(value) {
+                Err(format!("invalid shortcut: {value} (a-z 0-9 - _)"))
+            } else {
+                Ok(())
+            }
+        }
+        (Purpose::EditCommand { .. }, 0) => {
+            if value.is_empty() {
+                Err("linux command cannot be empty".to_string())
+            } else {
+                Ok(())
+            }
+        }
+        (Purpose::EditCommand { .. }, 1) => Ok(()), // empty = same as linux
         (Purpose::NewArg { .. }, 0) => {
             if value.is_empty() {
                 Err("arg key cannot be empty".to_string())
@@ -205,6 +291,9 @@ fn store_field(f: &mut Form, value: &str) {
         (Purpose::NewAlias, 1) => f.shortcuts = value.to_string(),
         (Purpose::NewAlias, 2) => f.linux = value.to_string(),
         (Purpose::NewAlias, 3) => f.macos = value.to_string(),
+        (Purpose::NewShortcut { .. }, 0) => f.shortcut = value.to_string(),
+        (Purpose::EditCommand { .. }, 0) => f.linux = value.to_string(),
+        (Purpose::EditCommand { .. }, 1) => f.macos = value.to_string(),
         (Purpose::NewArg { .. }, 0) => f.arg_key = value.to_string(),
         (Purpose::NewArg { .. }, 1) => f.arg_value = value.to_string(),
         _ => {}
@@ -240,6 +329,17 @@ fn build_submission(f: &Form) -> Submission {
             alias: alias.clone(),
             key: f.arg_key.clone(),
             value: f.arg_value.clone(),
+        },
+        Purpose::NewShortcut { alias } => Submission::Shortcut {
+            alias: alias.clone(),
+            shortcut: f.shortcut.clone(),
+        },
+        // A blank macos answer is left blank on purpose: `alias::set_commands`
+        // mirrors linux for it, the single-platform rule.
+        Purpose::EditCommand { alias } => Submission::Commands {
+            alias: alias.clone(),
+            linux: f.linux.clone(),
+            macos: f.macos.clone(),
         },
     }
 }
@@ -341,7 +441,7 @@ mod tests {
         assert_eq!(out, FormOutcome::Active);
         assert!(f.error.unwrap().contains("invalid name"));
         // duplicate name (against builtins, case-insensitive)
-        let f = type_str(&new_alias(), "BROWSER", &store);
+        let f = type_str(&new_alias(), "BR", &store);
         let (f, out) = enter(&f, &store);
         assert_eq!(out, FormOutcome::Active);
         assert!(f.error.unwrap().contains("already in use"));
@@ -381,6 +481,108 @@ mod tests {
                     (alias.as_str(), key.as_str(), value.as_str()),
                     ("t", "baidu", "https://www.baidu.com")
                 );
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shortcut_wizard_is_one_step_and_validates() {
+        let store = empty_store();
+        let f = new_shortcut("t");
+        assert_eq!(step_count(&f), 1);
+        assert_eq!(f.input, "");
+
+        // empty and malformed answers stay on the (only) step
+        let (f, out) = enter(&new_shortcut("t"), &store);
+        assert_eq!(out, FormOutcome::Active);
+        assert_eq!(f.error.as_deref(), Some("shortcut cannot be empty"));
+        let bad = type_str(&new_shortcut("t"), "bad!", &store);
+        let (bad, out) = enter(&bad, &store);
+        assert_eq!(out, FormOutcome::Active);
+        assert!(bad.error.unwrap().contains("invalid shortcut"));
+
+        let f = type_str(&new_shortcut("t"), "gc", &store);
+        let (f, out) = enter(&f, &store);
+        match out {
+            FormOutcome::Submit(Submission::Shortcut { alias, shortcut }) => {
+                assert_eq!((alias.as_str(), shortcut.as_str()), ("t", "gc"));
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+        assert_eq!(f.error, None);
+    }
+
+    #[test]
+    fn edit_command_wizard_prefills_both_steps() {
+        let store = empty_store();
+        let f = new_edit_command("br", Some("xdg-open {input}"), Some("open {input}"));
+        assert_eq!(step_count(&f), 2);
+        assert_eq!(f.input, "xdg-open {input}", "linux step starts prefilled");
+
+        // Enter accepts the prefilled linux command as-is
+        let (f, out) = enter(&f, &store);
+        assert_eq!(out, FormOutcome::Active);
+        assert_eq!(f.step, 1);
+        assert_eq!(f.input, "open {input}", "macos step starts prefilled too");
+
+        let (f, out) = enter(&f, &store);
+        match out {
+            FormOutcome::Submit(Submission::Commands {
+                alias,
+                linux,
+                macos,
+            }) => {
+                assert_eq!(alias, "br");
+                assert_eq!(linux, "xdg-open {input}");
+                assert_eq!(macos, "open {input}");
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+        assert_eq!(f.error, None);
+    }
+
+    #[test]
+    fn edit_command_ctrl_u_clears_and_blank_macos_stays_blank() {
+        let store = empty_store();
+        let f = new_edit_command("t", Some("printf %s {input}"), None);
+        assert_eq!(f.input, "printf %s {input}");
+        assert_eq!(f.macos, "", "no macos command to prefill");
+
+        // Ctrl+U clears the prefilled text; Enter on the empty field refuses
+        let (f, _) = handle_key(&f, &store, ctrl('u'));
+        assert_eq!(f.input, "");
+        let (f, out) = enter(&f, &store);
+        assert_eq!(out, FormOutcome::Active);
+        assert_eq!(f.error.as_deref(), Some("linux command cannot be empty"));
+
+        let f = type_str(&f, "echo {input}", &store);
+        let (f, _) = enter(&f, &store);
+        assert_eq!(f.step, 1);
+        assert_eq!(f.input, "", "nothing to prefill this time");
+
+        let (_, out) = enter(&f, &store);
+        match out {
+            FormOutcome::Submit(Submission::Commands { linux, macos, .. }) => {
+                assert_eq!(linux, "echo {input}");
+                assert_eq!(macos, "", "left blank: set_commands mirrors linux");
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edit_command_step_two_can_be_rewritten() {
+        let store = empty_store();
+        let f = new_edit_command("t", Some("xdg-open {input}"), Some("open {input}"));
+        let (f, _) = enter(&f, &store); // accept linux
+        let (f, _) = handle_key(&f, &store, ctrl('u')); // clear macos
+        let f = type_str(&f, "open -a Safari {input}", &store);
+        let (_, out) = enter(&f, &store);
+        match out {
+            FormOutcome::Submit(Submission::Commands { linux, macos, .. }) => {
+                assert_eq!(linux, "xdg-open {input}");
+                assert_eq!(macos, "open -a Safari {input}");
             }
             other => panic!("expected Submit, got {other:?}"),
         }

@@ -112,7 +112,10 @@ mod tests {
     #[test]
     fn title_sequences_are_exact_bytes() {
         assert_eq!(set_title_seq(TITLE), b"\x1b]0;xconsoler\x07".to_vec());
-        assert_eq!(set_title_seq("hello world"), b"\x1b]0;hello world\x07".to_vec());
+        assert_eq!(
+            set_title_seq("hello world"),
+            b"\x1b]0;hello world\x07".to_vec()
+        );
         assert_eq!(clear_title_seq(), b"\x1b]0;\x07".to_vec());
     }
 }

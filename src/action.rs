@@ -11,6 +11,9 @@ pub enum Action {
     Nop,
     Quit,
     ToggleBar,
+    OpenPalette,
+    ClosePalette,
+    PaletteAccept,
     Execute,
     SubmitColon,
     InsertChar(char),
@@ -28,15 +31,39 @@ pub fn on_key(app: &App, key: KeyEvent) -> Action {
         return Action::Nop;
     }
 
+    // Esc (unmodified): an open palette closes first; summon mode quits,
+    // otherwise it toggles the bar.
+    if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+        if app.palette.is_some() {
+            return Action::ClosePalette;
+        }
+        return if app.summon {
+            Action::Quit
+        } else {
+            Action::ToggleBar
+        };
+    }
+
+    // Command-palette hotkey (`app.command`): toggles the palette while the
+    // bar is shown. Falling through keeps the wake key in charge while hidden
+    // and in summon mode when both keys are the same.
+    if keyspec::matches(&app.command, &key) {
+        if app.palette.is_some() {
+            return Action::ClosePalette;
+        }
+        if app.visibility == Visibility::Shown && !(app.summon && app.command == app.wake) {
+            return Action::OpenPalette;
+        }
+    }
+
     // Global wake/sleep hotkey (`app.wake`, configurable via the store): in
     // summon mode it quits back to the shell prompt, otherwise it toggles.
     if keyspec::matches(&app.wake, &key) {
-        return if app.summon { Action::Quit } else { Action::ToggleBar };
-    }
-
-    // Esc (unmodified): summon mode quits, otherwise it toggles the bar.
-    if key.code == KeyCode::Esc && key.modifiers.is_empty() {
-        return if app.summon { Action::Quit } else { Action::ToggleBar };
+        return if app.summon {
+            Action::Quit
+        } else {
+            Action::ToggleBar
+        };
     }
 
     match app.visibility {
@@ -57,7 +84,9 @@ fn shown_key(app: &App, key: KeyEvent) -> Action {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
         KeyCode::Enter => {
-            if app.input.starts_with(':') {
+            if app.palette.is_some() {
+                Action::PaletteAccept
+            } else if app.input.starts_with(':') {
                 Action::SubmitColon
             } else {
                 Action::Execute
@@ -105,14 +134,14 @@ mod tests {
     }
 
     #[test]
-    fn alt_d_toggles_in_hidden_and_shown() {
+    fn alt_d_toggles_when_hidden_and_opens_the_palette_when_shown() {
         assert_eq!(
             on_key(&hidden(), key(KeyCode::Char('d'), KeyModifiers::ALT)),
             Action::ToggleBar
         );
         assert_eq!(
             on_key(&shown(), key(KeyCode::Char('D'), KeyModifiers::ALT)),
-            Action::ToggleBar
+            Action::OpenPalette
         );
     }
 
@@ -121,11 +150,14 @@ mod tests {
         let alt_shift = KeyModifiers::ALT | KeyModifiers::SHIFT;
         assert_eq!(
             on_key(&shown(), key(KeyCode::Char('d'), alt_shift)),
-            Action::ToggleBar,
-            "SHIFT is ignored by the wake matcher"
+            Action::OpenPalette,
+            "SHIFT is ignored by the key matcher"
         );
         let alt_ctrl = KeyModifiers::ALT | KeyModifiers::CONTROL;
-        assert_eq!(on_key(&hidden(), key(KeyCode::Char('d'), alt_ctrl)), Action::Nop);
+        assert_eq!(
+            on_key(&hidden(), key(KeyCode::Char('d'), alt_ctrl)),
+            Action::Nop
+        );
     }
 
     #[test]
@@ -136,10 +168,10 @@ mod tests {
             on_key(&app, key(KeyCode::Char('g'), KeyModifiers::CONTROL)),
             Action::ToggleBar
         );
-        // alt+d is no longer special: plain InsertChar while shown
+        // alt+d stays the default command-palette key while shown
         assert_eq!(
             on_key(&app, key(KeyCode::Char('d'), KeyModifiers::ALT)),
-            Action::Nop
+            Action::OpenPalette
         );
     }
 
@@ -170,6 +202,73 @@ mod tests {
         assert_eq!(
             on_key(&hidden(), key(KeyCode::Esc, KeyModifiers::NONE)),
             Action::ToggleBar
+        );
+    }
+
+    #[test]
+    fn summon_alt_d_still_quits() {
+        // Default command key == wake key: in summon mode the wake key wins.
+        assert_eq!(
+            on_key(&summon(), key(KeyCode::Char('d'), KeyModifiers::ALT)),
+            Action::Quit
+        );
+    }
+
+    #[test]
+    fn command_key_closes_the_open_palette() {
+        let mut app = shown();
+        app.palette = Some(0);
+        assert_eq!(
+            on_key(&app, key(KeyCode::Char('d'), KeyModifiers::ALT)),
+            Action::ClosePalette
+        );
+    }
+
+    #[test]
+    fn esc_closes_the_open_palette_in_both_modes() {
+        let mut app = shown();
+        app.palette = Some(2);
+        assert_eq!(
+            on_key(&app, key(KeyCode::Esc, KeyModifiers::NONE)),
+            Action::ClosePalette
+        );
+        let mut app = summon();
+        app.palette = Some(2);
+        assert_eq!(
+            on_key(&app, key(KeyCode::Esc, KeyModifiers::NONE)),
+            Action::ClosePalette
+        );
+    }
+
+    #[test]
+    fn distinct_command_key_opens_palette_and_leaves_the_wake_key_alone() {
+        let mut app = shown();
+        app.command = keyspec::parse("ctrl+o").unwrap();
+        assert_eq!(
+            on_key(&app, key(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            Action::OpenPalette
+        );
+        assert_eq!(
+            on_key(&app, key(KeyCode::Char('d'), KeyModifiers::ALT)),
+            Action::ToggleBar
+        );
+
+        // Even in summon mode a distinct command key opens the palette.
+        let mut app = summon();
+        app.command = keyspec::parse("ctrl+o").unwrap();
+        assert_eq!(
+            on_key(&app, key(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            Action::OpenPalette
+        );
+    }
+
+    #[test]
+    fn enter_on_the_open_palette_accepts() {
+        let mut app = shown();
+        app.palette = Some(0);
+        assert_eq!(
+            on_key(&app, key(KeyCode::Enter, KeyModifiers::NONE)),
+            Action::PaletteAccept
         );
     }
 
@@ -237,6 +336,31 @@ mod tests {
         );
     }
 
+    /// The same mapping while the palette is open: `app::move_selection`
+    /// routes the action to the palette rows there, and to the candidate
+    /// cursor (the list highlight) while it is closed.
+    #[test]
+    fn navigation_maps_the_same_while_the_palette_is_open() {
+        let mut app = shown();
+        app.palette = Some(0);
+        assert_eq!(
+            on_key(&app, key(KeyCode::Up, KeyModifiers::NONE)),
+            Action::MoveUp
+        );
+        assert_eq!(
+            on_key(&app, key(KeyCode::Down, KeyModifiers::NONE)),
+            Action::MoveDown
+        );
+        assert_eq!(
+            on_key(&app, key(KeyCode::Tab, KeyModifiers::NONE)),
+            Action::MoveDown
+        );
+        assert_eq!(
+            on_key(&app, key(KeyCode::Enter, KeyModifiers::NONE)),
+            Action::PaletteAccept
+        );
+    }
+
     #[test]
     fn editing_keys() {
         let app = shown();
@@ -267,6 +391,20 @@ mod tests {
         );
         assert_eq!(
             on_key(&shown(), release(KeyCode::Enter, KeyModifiers::NONE)),
+            Action::Nop
+        );
+        let mut app = shown();
+        app.palette = Some(0);
+        assert_eq!(
+            on_key(&app, release(KeyCode::Char('d'), KeyModifiers::ALT)),
+            Action::Nop
+        );
+        assert_eq!(
+            on_key(&app, release(KeyCode::Esc, KeyModifiers::NONE)),
+            Action::Nop
+        );
+        assert_eq!(
+            on_key(&app, release(KeyCode::Enter, KeyModifiers::NONE)),
             Action::Nop
         );
     }

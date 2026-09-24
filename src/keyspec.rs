@@ -3,8 +3,9 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-/// A wake key: one alphanumeric char plus exactly one modifier (`alt` xor
-/// `ctrl`). Produced by [`parse`]; plain data, freely copyable.
+/// A key spec (wake key / command-palette key): one alphanumeric char plus
+/// exactly one modifier (`alt` xor `ctrl`). Produced by [`parse`]; plain
+/// data, freely copyable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeySpec {
     pub alt: bool,
@@ -21,6 +22,12 @@ pub const DEFAULT: KeySpec = KeySpec {
     ctrl: false,
     ch: 'd',
 };
+
+/// Default command-palette key spec (same key as the default wake key).
+pub const DEFAULT_COMMAND_SPEC: &str = "alt+d";
+
+/// [`DEFAULT_COMMAND_SPEC`] already parsed, for fallbacks.
+pub const DEFAULT_COMMAND: KeySpec = DEFAULT;
 
 /// Parse `"alt+<c>"` / `"ctrl+<c>"`. The modifier must be lowercase; the
 /// character may be any case and is stored lowercase. Trimmed input is fine.
@@ -88,7 +95,7 @@ pub fn readline_seq(k: &KeySpec) -> String {
 }
 
 fn invalid(spec: &str, reason: &str) -> String {
-    format!("invalid wake key {spec:?}: {reason}")
+    format!("invalid key {spec:?}: {reason}")
 }
 
 #[cfg(test)]
@@ -174,10 +181,7 @@ mod tests {
         ));
         // SHIFT riding along is ignored.
         let alt_shift = KeyModifiers::ALT | KeyModifiers::SHIFT;
-        assert!(matches(
-            &k,
-            &KeyEvent::new(KeyCode::Char('d'), alt_shift)
-        ));
+        assert!(matches(&k, &KeyEvent::new(KeyCode::Char('d'), alt_shift)));
     }
 
     #[test]
@@ -190,10 +194,7 @@ mod tests {
         ));
         // ctrl riding along
         let alt_ctrl = KeyModifiers::ALT | KeyModifiers::CONTROL;
-        assert!(!matches(
-            &k,
-            &KeyEvent::new(KeyCode::Char('d'), alt_ctrl)
-        ));
+        assert!(!matches(&k, &KeyEvent::new(KeyCode::Char('d'), alt_ctrl)));
         // no modifier
         assert!(!matches(
             &k,
@@ -216,7 +217,11 @@ mod tests {
         ));
         assert!(!matches(
             &k,
-            &KeyEvent::new_with_kind(KeyCode::Char('d'), KeyModifiers::ALT, crossterm::event::KeyEventKind::Release)
+            &KeyEvent::new_with_kind(
+                KeyCode::Char('d'),
+                KeyModifiers::ALT,
+                crossterm::event::KeyEventKind::Release
+            )
         ));
     }
 }

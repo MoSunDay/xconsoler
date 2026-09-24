@@ -26,8 +26,8 @@ mod tests {
     #[test]
     fn newest_entry_lands_at_head() {
         let mut store = Store::default();
-        record(&mut store, "browser", "a", 1);
-        record(&mut store, "browser", "b", 2);
+        record(&mut store, "br", "a", 1);
+        record(&mut store, "br", "b", 2);
         assert_eq!(store.history.len(), 2);
         assert_eq!(store.history[0].input(), "b");
         assert_eq!(store.history[1].input(), "a");
@@ -36,9 +36,9 @@ mod tests {
     #[test]
     fn duplicate_moves_to_head_with_new_ts() {
         let mut store = Store::default();
-        record(&mut store, "browser", "a", 1);
-        record(&mut store, "browser", "b", 2);
-        record(&mut store, "browser", "a", 99);
+        record(&mut store, "br", "a", 1);
+        record(&mut store, "br", "b", 2);
+        record(&mut store, "br", "a", 99);
         assert_eq!(store.history.len(), 2);
         assert_eq!(store.history[0].input(), "a");
         assert_eq!(store.history[0].ts, 99);
@@ -48,8 +48,8 @@ mod tests {
     #[test]
     fn same_input_different_alias_not_deduped() {
         let mut store = Store::default();
-        record(&mut store, "browser", "a", 1);
-        record(&mut store, "clipboard", "a", 2);
+        record(&mut store, "br", "a", 1);
+        record(&mut store, "cd", "a", 2);
         assert_eq!(store.history.len(), 2);
     }
 
@@ -57,7 +57,7 @@ mod tests {
     fn capacity_truncates_oldest() {
         let mut store = Store::default();
         for i in 0..=MAX_HISTORY {
-            record(&mut store, "browser", &format!("i{i}"), i as u64);
+            record(&mut store, "br", &format!("i{i}"), i as u64);
         }
         assert_eq!(store.history.len(), MAX_HISTORY);
         assert_eq!(store.history[0].input(), format!("i{MAX_HISTORY}"));
