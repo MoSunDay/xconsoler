@@ -1,4 +1,10 @@
-# xconsoler
+<p align="center">
+  <img src="assets/logo.svg" alt="xconsoler" width="520">
+</p>
+
+<p align="center">
+  <em>A long-bar keyboard launcher for your terminal.</em>
+</p>
 
 A long-bar keyboard launcher for your terminal/tmux. `xconsoler` runs as a
 small TUI that starts **shown** — type an alias, some input, hit Enter — the
@@ -144,12 +150,42 @@ sudo install -m 0755 scripts/xc-bar scripts/xc-key /usr/local/bin/
 
 # register alt+d -> xc-bar in the running XFCE session (applied live):
 xc-key alt+d        # or, say: xc-key ctrl+g
+
+# icon set + menu entry for the summoned window (~/.local/share by default;
+# add --system for /usr/local/share):
+scripts/xc-icon
 ```
 
+### Logo & icon
+
+`assets/icon.svg` is the mark (the launcher bar drawn as an icon), `assets/logo.svg`
+the mark + wordmark lockup, and `assets/png/xconsoler-<size>.png` the raster icon
+set. All of it is generated — one geometry spec, SVG and raster backends, so they
+can never drift:
+
+```sh
+python3 scripts/gen-logo.py              # writes assets/**
+python3 scripts/gen-logo.py --preview    # ASCII proof, writes nothing
+scripts/xc-icon                          # install icons + xconsoler.desktop
+scripts/xc-icon --uninstall              # remove them again
+```
+
+The palette is `src/theme.rs` (kanagawa wave): accent `#7e9cd8` for the chevron,
+cursor `#c8c093` for the block cursor, `#2d4f67` for the selected candidate row.
+Changing the theme means changing those consts in `scripts/gen-logo.py` and
+re-running it. `xc-icon` installs each size twice — as `xconsoler` (menu entry)
+and as `XConsoler` (the WM_CLASS `xc-bar` gives the summoned window, which is how
+the taskbar finds the icon). Regenerating needs Pillow (`pip install pillow`).
+
 `xc-bar` spawns a `gnome-terminal` window (`--class=XConsoler`, 140x14 near
-the top) with a dedicated 0.7-transparent GNOME Terminal profile — override
-the opacity with e.g. `XC_TRANS=85 xc-bar` — and runs
-`xconsoler --summon` inside it. Calling it again while the bar is up kills
+the top) with a dedicated GNOME Terminal profile: 0.7 transparent
+(`background-transparency-percent=70`, linear in VTE, so 70% of the desktop
+shows through) over the pinned kanagawa palette (`background-color=#1f1f28`,
+`foreground-color=#dcdcdc`, `use-theme-colors=false`) because the launcher
+paints no backgrounds of its own. Override the transparency with e.g.
+`XC_TRANS=85 xc-bar`; profile setup is idempotent and falls back to an opaque
+window (one-line stderr warning) when gsettings/dconf are unavailable. It
+then runs `xconsoler --summon` inside that window. Calling it again while the bar is up kills
 the bar instead of opening a second one, and a successful run dismisses it
 automatically, Spotlight-style.
 

@@ -2,6 +2,8 @@
 # xconsoler long-bar toggle for the desktop (XFCE/X11):
 # running -> dismiss; not running -> summon a top-center bar terminal
 # (titled "xconsoler", 0.7-alpha background when gnome-terminal allows).
+# Window/taskbar icon: run scripts/xc-icon once -- it installs the hicolor set
+# as "XConsoler", the WM_CLASS this script hands the terminal below.
 set -u
 UID_N=$(id -u)
 if pgrep -u "$UID_N" -f 'xconsoler --summon' >/dev/null 2>&1; then
@@ -20,8 +22,8 @@ GEOM="${COLS}x${ROWS}+${X}+48"
 
 # --- transparent bar profile (gnome-terminal) ---------------------------
 # Ensure a dedicated profile (visible-name "xconsoler") with
-# background-transparency-percent=$TRANS (70 => 0.7 alpha; override with
-# XC_TRANS). The profile uuid is generated once and pinned in
+# background-transparency-percent=$TRANS (70 => 70% transparent, alpha 0.3;
+# override with XC_TRANS). The profile uuid is generated once and pinned in
 # ~/.config/xconsoler/gt-profile; the ProfilesList entry is idempotent.
 CFG_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/xconsoler
 GT_PROFILE_FILE=$CFG_DIR/gt-profile
@@ -66,6 +68,12 @@ gt_ensure_profile() {
     dconf write "${PROF}use-transparent-background" true 2>/dev/null || return 1
     dconf write "${PROF}background-transparency-percent" "$TRANS" 2>/dev/null ||
         return 1
+    # VTE would otherwise inherit the GTK theme colours; pin the launcher
+    # palette (#1f1f28 sumiInk0 / #dcdcdc fujiWhite, see src/theme.rs) so
+    # light text stays readable on the dark translucent bar.
+    dconf write "${PROF}use-theme-colors" false 2>/dev/null || return 1
+    dconf write "${PROF}background-color" "'#1f1f28'" 2>/dev/null || return 1
+    dconf write "${PROF}foreground-color" "'#dcdcdc'" 2>/dev/null || return 1
     printf '%s\n' xconsoler
 }
 

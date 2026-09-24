@@ -8,11 +8,12 @@
 
 use ratatui::style::Color;
 
-/// Window opacity the theme targets. Terminal cells cannot carry alpha, so
+/// Transparency the theme targets: the host terminal is expected to be 70%
+/// transparent (alpha 0.3), so every cell lets the desktop through. Terminal cells cannot carry alpha, so
 /// the launcher paints NO explicit backgrounds (cells stay at the terminal
 /// default) and the host terminal's translucency (e.g. terminator-rust
 /// window opacity / kitty `background_opacity`) shows through every cell of
-/// the bar, matching this 0.7 target. The few inks that must stay visible
+/// the bar, matching this 70%-transparent target. The few inks that must stay visible
 /// (selection, cursor) use the palette's own colors and remain opaque -
 /// the same policy as terminator-rust's `pane_bg_alpha`/`with_opacity`.
 pub const OPACITY: f32 = 0.7;
