@@ -1,34 +1,32 @@
-//! Frame rendering. All colours are semantic consts at the top — a single
-//! source of truth (the opencoder `theme.rs` pattern) so call sites never
-//! hard-code raw `Color` values.
+//! Frame rendering. All colours live in one place - `crate::theme` - so
+//! call sites never hard-code raw `Color` values. The theme is the
+//! terminator-rust kanagawa port; its 0.7 opacity policy means no explicit
+//! cell backgrounds outside the selection/cursor inks.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::alias;
+use crate::exec;
 use crate::keyspec;
 use crate::matcher::Candidate;
 use crate::platform::{self, Platform};
-use crate::state::{self, App, Visibility, CANDIDATE_LIMIT};
+use crate::settings_view;
+use crate::state::{self, App, Mode, Visibility, CANDIDATE_LIMIT};
+use crate::theme::{ACCENT, BORDER, CURSOR, ERR, MUTED, OK, SELECT_BG, SUBTLE, TEXT};
 
-// ── Semantic palette ────────────────────────────────────────────────────────
-/// Primary accent: titles, prompt, alias labels, selection background.
-const ACCENT: Color = Color::Cyan;
-/// Success status.
-const OK: Color = Color::Green;
-/// Error status.
-const ERR: Color = Color::Red;
-/// Dimmed chrome: hidden hint, key hints, history markers.
-const MUTED: Color = Color::DarkGray;
-/// Secondary text: command templates, block titles.
-const SUBTLE: Color = Color::Gray;
-/// Primary text: user input, history inputs.
-const TEXT: Color = Color::White;
-
-const MAIN_TITLE: &str = " xconsoler ";
+/// Bar title: the brand mark in text - accent chevron + cursor-coloured block,
+/// the terminal echo of `assets/icon.svg` - in front of the wordmark.
+fn brand_title() -> Line<'static> {
+    Line::from(vec![
+        Span::styled(" ❯", Style::new().fg(ACCENT)),
+        Span::styled("▌", Style::new().fg(CURSOR)),
+        Span::styled(" xconsoler ", Style::new().fg(ACCENT)),
+    ])
+}
 
 /// Hidden-mode one-liner; the wake key is injected at render time so a
 /// custom `--wake-key` / stored config shows the real binding.
@@ -44,22 +42,34 @@ const HELP_TITLE: &str = " : commands ";
 
 /// Help lines shown while the input starts with `:`; the first word of each
 /// line is the token being explained.
-const HELP_LINES: [&str; 5] = [
+const HELP_LINES: [&str; 7] = [
     ":add <name>[,<short>...] <linux-cmd> // <macos-cmd>",
     ":del <name>",
+    ":arg <name> <key> <value...> — set a named argument",
+    ":unarg <name> <key> — remove a named argument",
     ":help — show this help",
     "{input} — your input, shell-quoted into the command",
     "@stdin — your input is piped to the command's stdin",
 ];
 
-/// Draw one frame: the hidden one-liner or the full launcher layout.
+const SLASH_TITLE: &str = " / commands ";
+
+/// Help lines shown while the input starts with `/`.
+const SLASH_LINES: [&str; 1] = ["/settings — open the settings page"];
+
+/// Draw one frame: the hidden one-liner or the full launcher layout. In
+/// settings mode the whole screen belongs to the settings page — the
+/// long-bar/candidates layout is not drawn at all.
 pub fn draw(f: &mut Frame, app: &App) {
     // Blank the frame first: switching visibility or shrinking the list must
     // not leave stale cells behind (ratatui only diffs what is re-rendered).
     f.render_widget(Clear, f.area());
-    match app.visibility {
-        Visibility::Hidden => draw_hidden(f, app),
-        Visibility::Shown => draw_shown(f, app),
+    match app.mode {
+        Mode::Normal => match app.visibility {
+            Visibility::Hidden => draw_hidden(f, app),
+            Visibility::Shown => draw_shown(f, app),
+        },
+        Mode::Settings(ref st) => settings_view::draw(f, st, &app.aliases),
     }
 }
 
@@ -79,7 +89,9 @@ fn draw_shown(f: &mut Frame, app: &App) {
 
     let cands = state::candidates(app);
     if app.input.starts_with(':') {
-        y = draw_help(f, width, y);
+        y = draw_help(f, width, y, HELP_TITLE, &HELP_LINES);
+    } else if app.input.starts_with('/') {
+        y = draw_help(f, width, y, SLASH_TITLE, &SLASH_LINES);
     } else if !cands.is_empty() {
         y = draw_list(f, app, &cands, width, y);
     }
@@ -89,7 +101,7 @@ fn draw_shown(f: &mut Frame, app: &App) {
 /// Full-width input bar: `❯ ` + input + a reverse-space cursor at the end.
 fn draw_input_bar(f: &mut Frame, app: &App, width: u16) -> u16 {
     let rect = row_rect(width, 0, 3);
-    let block = main_block(MAIN_TITLE);
+    let block = main_block_line(brand_title());
     let inner = block.inner(rect);
     let budget = inner.width.saturating_sub(3) as usize; // "❯ " + cursor cell
     let shown: String = app.input.chars().take(budget).collect();
@@ -97,7 +109,7 @@ fn draw_input_bar(f: &mut Frame, app: &App, width: u16) -> u16 {
         Paragraph::new(Line::from(vec![
             Span::styled("❯ ", Style::new().fg(ACCENT)),
             Span::styled(shown, Style::new().fg(TEXT)),
-            Span::styled(" ", Style::new().bg(ACCENT).fg(ACCENT)),
+            Span::styled(" ", Style::new().bg(CURSOR).fg(CURSOR)),
         ]))
         .block(block),
         rect,
@@ -106,17 +118,36 @@ fn draw_input_bar(f: &mut Frame, app: &App, width: u16) -> u16 {
 }
 
 /// Candidate list under the bar. Returns the next free row.
-fn draw_list(f: &mut Frame, app: &App, cands: &[Candidate], width: u16, y: u16) -> u16 {
-    let rows = cands.len().min(CANDIDATE_LIMIT);
-    let hist = cands
+/// List block title: per-kind row counts. Named-arg rows are only
+/// mentioned when present (they take over the list while typing
+/// `<alias> <partial>`).
+fn list_title(cands: &[Candidate], rows: usize) -> String {
+    let shown = &cands[..rows.min(cands.len())];
+    let hist = shown
         .iter()
         .filter(|c| matches!(c, Candidate::History { .. }))
         .count();
-    let title = format!(" matches · {hist} history · {} alias ", rows - hist);
+    let args = shown
+        .iter()
+        .filter(|c| matches!(c, Candidate::Arg { .. }))
+        .count();
+    let mut parts = vec![
+        format!("{hist} history"),
+        format!("{} alias", shown.len() - hist - args),
+    ];
+    if args > 0 {
+        parts.push(format!("{args} args"));
+    }
+    format!(" matches · {} ", parts.join(" · "))
+}
+
+fn draw_list(f: &mut Frame, app: &App, cands: &[Candidate], width: u16, y: u16) -> u16 {
+    let rows = cands.len().min(CANDIDATE_LIMIT);
+    let title = list_title(cands, rows);
     let rect = row_rect(width, y, rows as u16 + 2);
     let block = main_block(&title);
     let inner = block.inner(rect);
-    let sel_style = Style::new().bg(ACCENT).fg(Color::Black);
+    let sel_style = Style::new().bg(SELECT_BG).fg(TEXT);
     // Same clamp as `state::selected` so the highlight matches what Enter runs.
     let cursor = app.cursor.min(rows.saturating_sub(1));
     let pf = platform::current();
@@ -129,6 +160,7 @@ fn draw_list(f: &mut Frame, app: &App, cands: &[Candidate], width: u16, y: u16) 
             let segs = match cand {
                 Candidate::History { idx } => history_segments(app, *idx),
                 Candidate::Alias { name } => alias_segments(app, name, pf),
+                Candidate::Arg { alias, key } => arg_row_segments(app, alias, key),
             };
             segments_line(segs, inner.width as usize, i == cursor, sel_style)
         })
@@ -137,11 +169,11 @@ fn draw_list(f: &mut Frame, app: &App, cands: &[Candidate], width: u16, y: u16) 
     rect.y + rect.height
 }
 
-/// `:command` help block replacing the list. Returns the next free row.
-fn draw_help(f: &mut Frame, width: u16, y: u16) -> u16 {
-    let rect = row_rect(width, y, HELP_LINES.len() as u16 + 2);
-    let block = main_block(HELP_TITLE);
-    let lines: Vec<Line> = HELP_LINES
+/// `:`/`/` command help block replacing the list. Returns the next free row.
+fn draw_help(f: &mut Frame, width: u16, y: u16, title: &str, lines: &[&str]) -> u16 {
+    let rect = row_rect(width, y, lines.len() as u16 + 2);
+    let block = main_block(title);
+    let lines: Vec<Line> = lines
         .iter()
         .map(|l| match l.split_once(' ') {
             Some((token, rest)) => Line::from(vec![
@@ -196,10 +228,27 @@ fn history_segments(app: &App, idx: usize) -> Vec<(String, Style)> {
     }
 }
 
-/// Alias row: `★ <label> · <command template for the current platform>`.
+/// Alias row: `★ <label> · <command template for the current platform>` —
+/// or, when the input is `<this alias> <rest>`, a preview of the input the
+/// command will receive (named args resolved): `★ br · → https://…`.
 fn alias_segments(app: &App, name: &str, pf: Platform) -> Vec<(String, Style)> {
     match alias::resolve(&app.aliases, name) {
         Some(def) => {
+            let mut parts = app.input.trim().splitn(2, char::is_whitespace);
+            let head = parts.next().unwrap_or("");
+            let rest = parts.next().unwrap_or("");
+            let is_trigger = !rest.trim().is_empty()
+                && alias::resolve(&app.aliases, head).is_some_and(|h| h.name == def.name);
+            if is_trigger {
+                let resolved = exec::resolve_args(def, rest);
+                return vec![
+                    ("★ ".into(), Style::new().fg(ACCENT)),
+                    (alias::label(def), Style::new().fg(ACCENT)),
+                    (" · ".into(), Style::new().fg(SUBTLE)),
+                    ("→ ".into(), Style::new().fg(MUTED)),
+                    (resolved, Style::new().fg(TEXT)),
+                ];
+            }
             let cmd = match pf {
                 Platform::Linux => def.linux.as_deref(),
                 Platform::Macos => def.macos.as_deref(),
@@ -216,10 +265,24 @@ fn alias_segments(app: &App, name: &str, pf: Platform) -> Vec<(String, Style)> {
     }
 }
 
+/// Named-arg sub-candidate row: `↳ <key> · <value>` (shown when the input
+/// is `<alias> `).
+fn arg_row_segments(app: &App, alias: &str, key: &str) -> Vec<(String, Style)> {
+    let value = alias::resolve(&app.aliases, alias)
+        .and_then(|d| d.args.get(key).cloned())
+        .unwrap_or_else(|| "…".to_string());
+    vec![
+        ("↳ ".into(), Style::new().fg(MUTED)),
+        (key.to_string(), Style::new().fg(ACCENT)),
+        (" · ".into(), Style::new().fg(SUBTLE)),
+        (value, Style::new().fg(SUBTLE)),
+    ]
+}
+
 /// Lay out styled segments on one row: truncation is unicode-safe (whole
 /// `char`s only, no byte slicing); a selected row gets an accent background
-/// padded across the full inner width.
-fn segments_line(
+/// padded across the full inner width. Shared with the settings page.
+pub(crate) fn segments_line(
     segs: Vec<(String, Style)>,
     width: usize,
     selected: bool,
@@ -258,12 +321,22 @@ fn segments_line(
     Line::from(spans)
 }
 
-/// Shared block preset: rounded borders, subtle title.
-fn main_block(title: &str) -> Block<'_> {
+/// Shared block preset: rounded borders, subtle title. Shared with the
+/// settings page.
+pub(crate) fn main_block(title: &str) -> Block<'static> {
+    main_block_line(Line::from(Span::styled(
+        title.to_string(),
+        Style::new().fg(ACCENT),
+    )))
+}
+
+/// Same preset for a multi-span title (the input bar carries the brand mark).
+fn main_block_line(title: Line<'static>) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(Span::styled(title, Style::new().fg(ACCENT)))
+        .border_style(Style::new().fg(BORDER))
+        .title(title)
 }
 
 fn row_rect(width: u16, y: u16, height: u16) -> Rect {
@@ -282,6 +355,27 @@ mod tests {
     use crate::storage::Store;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    #[test]
+    fn bar_title_carries_the_brand_mark() {
+        let text = draw_once(&state::new(Store::default(), false));
+        assert!(
+            text.contains("❯▌ xconsoler"),
+            "input-bar title lost the mark: {text}"
+        );
+    }
+
+    #[test]
+    fn list_title_counts_kinds_and_hides_empty_args() {
+        let hist = vec![Candidate::History { idx: 0 }];
+        assert_eq!(list_title(&hist, 1), " matches · 1 history · 0 alias ");
+        let mixed = vec![
+            Candidate::History { idx: 0 },
+            Candidate::Alias { name: "browser".to_string() },
+            Candidate::Arg { alias: "browser".to_string(), key: "baidu".to_string() },
+        ];
+        assert_eq!(list_title(&mixed, 3), " matches · 1 history · 1 alias · 1 args ");
+    }
 
     fn frame_text(terminal: &Terminal<TestBackend>) -> String {
         let buf = terminal.backend().buffer();
@@ -371,5 +465,37 @@ mod tests {
         assert!(!text.contains("matches"));
         assert!(text.contains("alt+d hide"));
         assert!(text.contains("❯ zzz"));
+    }
+
+    /// Opacity-policy guard (`theme::OPACITY` = 0.7): only the selection row
+    /// and the cursor block may paint a background. Every other cell stays at
+    /// the terminal default so the host terminal's translucency shows through.
+    #[test]
+    fn only_selection_and_cursor_paint_backgrounds() {
+        let mut store = Store::default();
+        record(&mut store, "browser", "docs", 1);
+        let mut app = state::new(store, false);
+        app.cursor = 1; // selects the first alias row
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+
+        let mut sel_cells = 0;
+        let mut cursor_cells = 0;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                match buf[(x, y)].style().bg {
+                    // `Clear` writes an explicit Reset - still terminal default.
+                    None => {}
+                    Some(ratatui::style::Color::Reset) => {}
+                    Some(c) if c == SELECT_BG => sel_cells += 1,
+                    Some(c) if c == CURSOR => cursor_cells += 1,
+                    Some(other) => panic!("unexpected painted background {other:?} at ({x},{y})"),
+                }
+            }
+        }
+        assert_eq!(sel_cells, 78); // inner width: 80 minus the two borders
+        assert_eq!(cursor_cells, 1); // one reverse-space cursor cell
     }
 }

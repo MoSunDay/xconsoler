@@ -4,6 +4,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::alias::AliasDef;
+use crate::clipboard;
 use crate::platform::{self, Platform};
 
 /// Result of running an alias command.
@@ -32,6 +33,38 @@ pub fn shell_quote(s: &str) -> String {
     out
 }
 
+/// Resolve **named arguments** in `rest`, the input after the alias trigger
+/// word.
+///
+/// If the first whitespace-separated token of `rest` is a key of `def.args`,
+/// that token is replaced by the mapped value and the remaining tokens are
+/// appended after it (`br baidu -incognito` → `https://baidu.com -incognito`
+/// when `baidu` maps to the URL). Otherwise — no key match, no args at all,
+/// empty rest, or a whitespace-only value — the trimmed `rest` is returned
+/// unchanged, so aliases without named args behave exactly as before.
+pub fn resolve_args(def: &AliasDef, rest: &str) -> String {
+    let trimmed = rest.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let head = parts.next().unwrap_or("");
+    let tail = parts.next().unwrap_or("").trim();
+    match def.args.get(head) {
+        Some(value) if !value.trim().is_empty() => {
+            let mut out = value.trim().to_string();
+            if !tail.is_empty() {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(tail);
+            }
+            out
+        }
+        _ => trimmed.to_string(),
+    }
+}
+
 /// Run `def` for `input` on `platform`.
 ///
 /// Template handling:
@@ -57,6 +90,15 @@ pub fn run_alias(def: &AliasDef, input: &str, platform: Platform) -> ExecOutcome
             ))
         }
     };
+
+    // Built-in native backends (`@native clipboard`) bypass the shell and
+    // the {input}/@stdin conventions: the raw input is the payload.
+    if clipboard::is_native(template) {
+        return match clipboard::copy(input) {
+            Ok(()) => ExecOutcome::Success(format!("{} ok", def.name)),
+            Err(msg) => ExecOutcome::Failure(msg),
+        };
+    }
 
     let needs_stdin = template.contains(STDIN_MARKER);
     let mut cmd = if needs_stdin {
@@ -132,6 +174,7 @@ fn tail_chars(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn def(name: &str, linux: &str) -> AliasDef {
         AliasDef {
@@ -139,6 +182,7 @@ mod tests {
             shortcuts: vec![],
             linux: Some(linux.to_string()),
             macos: None,
+            args: BTreeMap::new(),
             builtin: false,
         }
     }
@@ -149,6 +193,69 @@ mod tests {
         assert_eq!(shell_quote(""), "''");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
         assert_eq!(shell_quote("a b'c"), "'a b'\\''c'");
+    }
+
+    fn def_with_args(
+        name: &str,
+        linux: &str,
+        args: &[(&str, &str)],
+    ) -> AliasDef {
+        let mut d = def(name, linux);
+        for (k, v) in args {
+            d.args.insert(k.to_string(), v.to_string());
+        }
+        d
+    }
+
+    #[test]
+    fn resolve_args_without_args_returns_trimmed_rest() {
+        let d = def("t", "printf %s {input}");
+        assert_eq!(resolve_args(&d, "hello world"), "hello world");
+        assert_eq!(resolve_args(&d, "  spaced  "), "spaced");
+    }
+
+    #[test]
+    fn resolve_args_replaces_matching_key() {
+        let d = def_with_args("br", "xdg-open {input}", &[("baidu", "https://www.baidu.com")]);
+        assert_eq!(resolve_args(&d, "baidu"), "https://www.baidu.com");
+        // surrounding whitespace is trimmed before the lookup
+        assert_eq!(resolve_args(&d, "   baidu   "), "https://www.baidu.com");
+    }
+
+    #[test]
+    fn resolve_args_appends_remaining_tokens_after_value() {
+        let d = def_with_args("br", "xdg-open {input}", &[("baidu", "https://www.baidu.com")]);
+        assert_eq!(
+            resolve_args(&d, "baidu extra tokens"),
+            "https://www.baidu.com extra tokens"
+        );
+    }
+
+    #[test]
+    fn resolve_args_keeps_unmatched_first_token() {
+        let d = def_with_args("br", "xdg-open {input}", &[("baidu", "https://www.baidu.com")]);
+        assert_eq!(resolve_args(&d, "google.com search"), "google.com search");
+    }
+
+    #[test]
+    fn resolve_args_empty_rest_stays_empty() {
+        let d = def_with_args("br", "xdg-open {input}", &[("baidu", "https://www.baidu.com")]);
+        assert_eq!(resolve_args(&d, ""), "");
+        assert_eq!(resolve_args(&d, "   "), "");
+    }
+
+    #[test]
+    fn resolve_args_value_may_contain_spaces() {
+        let d = def_with_args("run", "sh -c {input}", &[("here", "cd /tmp && ls")]);
+        assert_eq!(resolve_args(&d, "here -la"), "cd /tmp && ls -la");
+        assert_eq!(resolve_args(&d, "here"), "cd /tmp && ls");
+    }
+
+    #[test]
+    fn resolve_args_ignores_whitespace_only_value() {
+        // a blank mapping would silently eat the input; treat it as no match
+        let d = def_with_args("t", "printf %s {input}", &[("blank", "   ")]);
+        assert_eq!(resolve_args(&d, "blank tail"), "blank tail");
     }
 
     #[test]
@@ -164,6 +271,7 @@ mod tests {
             shortcuts: vec![],
             linux: Some("   ".to_string()),
             macos: None,
+            args: BTreeMap::new(),
             builtin: false,
         };
         assert!(matches!(

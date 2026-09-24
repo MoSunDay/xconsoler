@@ -1,0 +1,101 @@
+#!/bin/sh
+# Install (or remove) the xconsoler brand assets into the desktop data dirs:
+# the hicolor icon set, the scalable mark and the menu entry.
+#
+#   xc-icon            user install   ($XDG_DATA_HOME or ~/.local/share)
+#   xc-icon --system   system install (/usr/local/share, needs sudo)
+#   xc-icon --prefix D explicit prefix (packaging staging dirs)
+#   xc-icon -u         uninstall what this script installed
+#
+# Assets come from scripts/gen-logo.py; re-run it first if the logo changed.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ASSETS=$ROOT/assets
+PREFIX=${XDG_DATA_HOME:-$HOME/.local/share}
+MODE=install
+SIZES="16 24 32 48 64 128 256 512"
+# The summoned bar window sets WM_CLASS=XConsoler (scripts/xc-bar) and DEs look
+# icons up by that name, so every size lands under both names.
+NAMES="xconsoler XConsoler"
+
+usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; }
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --prefix)
+            [ $# -ge 2 ] || { echo "xc-icon: --prefix needs a directory" >&2; exit 2; }
+            PREFIX=$2; shift 2 ;;
+        --system) PREFIX=/usr/local/share; shift ;;
+        -u|--uninstall) MODE=uninstall; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "xc-icon: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+ICONS=$PREFIX/icons/hicolor
+APPS=$PREFIX/applications
+
+# Menu entry: prefer an installed xc-bar, else point at the one in this repo.
+desktop_entry() {
+    if command -v xc-bar >/dev/null 2>&1; then
+        sed "s|^Exec=.*|Exec=$(command -v xc-bar)|" "$ASSETS/xconsoler.desktop"
+    else
+        sed "s|^Exec=.*|Exec=$ROOT/scripts/xc-bar|" "$ASSETS/xconsoler.desktop"
+    fi
+}
+
+refresh_caches() {
+    command -v gtk-update-icon-cache >/dev/null 2>&1 \
+        && gtk-update-icon-cache -q -f -t "$ICONS" || true
+    command -v update-desktop-database >/dev/null 2>&1 \
+        && update-desktop-database -q "$APPS" || true
+}
+
+install_assets() {
+    for size in $SIZES; do
+        png=$ASSETS/png/xconsoler-$size.png
+        [ -f "$png" ] || {
+            echo "xc-icon: missing $png - run: python3 scripts/gen-logo.py" >&2
+            exit 1
+        }
+        for name in $NAMES; do
+            mkdir -p "$ICONS/${size}x${size}/apps"
+            cp "$png" "$ICONS/${size}x${size}/apps/$name.png"
+        done
+    done
+    [ -f "$ASSETS/icon.svg" ] || {
+        echo "xc-icon: missing $ASSETS/icon.svg - run: python3 scripts/gen-logo.py" >&2
+        exit 1
+    }
+    mkdir -p "$ICONS/scalable/apps" "$APPS"
+    for name in $NAMES; do
+        cp "$ASSETS/icon.svg" "$ICONS/scalable/apps/$name.svg"
+    done
+    desktop_entry > "$APPS/xconsoler.desktop"
+    chmod 0644 "$APPS/xconsoler.desktop"
+}
+
+uninstall_assets() {
+    for size in $SIZES; do
+        for name in $NAMES; do
+            rm -f "$ICONS/${size}x${size}/apps/$name.png"
+        done
+    done
+    for name in $NAMES; do
+        rm -f "$ICONS/scalable/apps/$name.svg"
+    done
+    rm -f "$APPS/xconsoler.desktop"
+}
+
+if [ "$MODE" = uninstall ]; then
+    uninstall_assets
+    refresh_caches
+    echo "xc-icon: removed icons + menu entry under $PREFIX"
+else
+    install_assets
+    refresh_caches
+    echo "xc-icon: installed icons + menu entry under $PREFIX"
+    echo "         menu/panel icon caches are read at login: log out and"
+    echo "          back in if the old icon is still showing"
+fi

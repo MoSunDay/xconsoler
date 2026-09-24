@@ -19,6 +19,14 @@ pub enum Visibility {
     Shown,
 }
 
+/// Which page owns the event loop: the launcher bar or the `/settings`
+/// screen (whose state lives in [`crate::settings`]).
+#[derive(Debug, Clone)]
+pub enum Mode {
+    Normal,
+    Settings(Box<crate::settings::Settings>),
+}
+
 /// Whole TUI state. `store` is the persisted part; `aliases` is the derived
 /// `storage::merge_aliases` view used for resolution and rendering.
 #[derive(Debug)]
@@ -37,6 +45,8 @@ pub struct App {
     /// Summon mode (started from a shell keybind): the wake key / Esc quit
     /// back to the prompt instead of hiding the bar.
     pub summon: bool,
+    /// Which page owns keys/rendering: launcher bar or the settings screen.
+    pub mode: Mode,
 }
 
 /// Build an app from a loaded store: **shown**, empty input, merged aliases.
@@ -54,13 +64,21 @@ pub fn new(store: Store, summon: bool) -> App {
         quit: false,
         wake,
         summon,
+        mode: Mode::Normal,
     }
 }
 
 /// Ranked candidates for the current input (trimmed), capped at
 /// [`CANDIDATE_LIMIT`].
 pub fn candidates(app: &App) -> Vec<Candidate> {
-    matcher::candidates(&app.store, &app.aliases, app.input.trim(), CANDIDATE_LIMIT)
+    // `<alias> <partial>` switches to that alias's named args; anything else
+    // (including a bare alias) keeps the normal history/alias ranking.
+    let args = matcher::arg_candidates(&app.aliases, &app.input, CANDIDATE_LIMIT);
+    if args.is_empty() {
+        matcher::candidates(&app.store, &app.aliases, app.input.trim(), CANDIDATE_LIMIT)
+    } else {
+        args
+    }
 }
 
 /// The candidate the cursor points at. An out-of-range cursor falls back to
@@ -85,6 +103,45 @@ mod tests {
         record(&mut store, "browser", "a", 1);
         record(&mut store, "browser", "b", 2);
         new(store, false)
+    }
+
+    fn app_with_named_arg() -> App {
+        let mut store = Store::default();
+        let mut def = crate::alias::defaults().remove(0); // browser (`br`)
+        def.builtin = false;
+        def.args
+            .insert("baidu".to_string(), "https://www.baidu.com".to_string());
+        store.aliases.push(def);
+        new(store, false)
+    }
+
+    #[test]
+    fn named_arg_context_lists_args_once_a_space_is_typed() {
+        let mut app = app_with_named_arg();
+        assert!(
+            candidates(&app).iter().all(|c| !matches!(c, Candidate::Arg { .. })),
+            "empty input: normal ranking"
+        );
+        app.input = "br".to_string();
+        assert!(
+            candidates(&app).iter().all(|c| !matches!(c, Candidate::Arg { .. })),
+            "bare alias still ranks aliases"
+        );
+        app.input = "br ".to_string();
+        assert_eq!(
+            candidates(&app),
+            vec![Candidate::Arg { alias: "browser".to_string(), key: "baidu".to_string() }]
+        );
+        app.input = "br bai".to_string();
+        assert_eq!(
+            candidates(&app),
+            vec![Candidate::Arg { alias: "browser".to_string(), key: "baidu".to_string() }]
+        );
+        app.input = "br zzz".to_string();
+        assert!(
+            candidates(&app).iter().all(|c| !matches!(c, Candidate::Arg { .. })),
+            "unmatched partial falls back to the normal ranking"
+        );
     }
 
     #[test]

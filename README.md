@@ -21,7 +21,8 @@ xconsoler -h | --help                      # usage
 
 The bar is **visible on startup** — a fresh launch never looks like it
 exited immediately. Hide it with the wake key and bring it back with the
-same key whenever you like.
+same key whenever you like. Its terminal title is set to `xconsoler` (and
+cleared again on exit, so your shell prompt can re-apply its own).
 
 ## Keys
 
@@ -40,7 +41,7 @@ same key whenever you like.
 | Alias (shortcut)  | Linux                                        | macOS             |
 |-------------------|----------------------------------------------|-------------------|
 | `browser` (`br`)  | `xdg-open {input} >/dev/null 2>&1`           | `open {input}`    |
-| `clipboard` (`cd`)| `wl-copy @stdin \|\| xclip … \|\| xsel …`     | `pbcopy @stdin`   |
+| `clipboard` (`cd`)| `@native clipboard` (built-in Rust backend)    | `@native clipboard` |
 
 ## Custom aliases (`:` commands)
 
@@ -49,6 +50,8 @@ Type a line starting with `:` and press Enter:
 ```
 :add <name>[,<shortcut>...] <linux-cmd> // <macos-cmd>
 :del <name>
+:arg <name> <key> <value...>       # register a named argument
+:unarg <name> <key>                # remove a named argument
 :help
 ```
 
@@ -56,6 +59,11 @@ Examples:
 
 ```
 :add gh,git-open xdg-open https://github.com/{input} // open https://github.com/{input}
+
+The `clipboard` alias copies through the [`arboard`](https://crates.io/crates/arboard)
+crate directly — no `xclip` / `wl-copy` / `xsel` / `pbcopy` binaries required
+(Linux needs X11 or XWayland). Override it with `:add clipboard <cmd> // <cmd>`
+if you prefer your own tool.
 :add clip-mac - // pbcopy @stdin      ('-' = not configured on linux)
 :del gh
 ```
@@ -66,6 +74,38 @@ Placeholders:
 * `@stdin` — your input is piped to the command's **stdin** instead.
 
 Built-ins cannot be deleted; re-define them with `:add` to override.
+
+### Named arguments
+
+Give an alias short names for the inputs you use all the time:
+
+```
+:arg br baidu https://www.baidu.com
+```
+
+Now `br baidu` opens `https://www.baidu.com`, while plain `br` and
+`br <anything else>` behave exactly as before. As soon as you type
+`<alias> `, the named args show up as sub-candidates (`↳ baidu ·
+https://www.baidu.com`) — Enter on one runs its value. Values may contain
+spaces; history keeps the raw text (`baidu`), so the shorthand stays
+replayable. Setting an argument on a built-in alias materializes it as an
+overriding user definition.
+
+## Settings page (`/settings`)
+
+Type `/settings` and press Enter for a full-screen alias manager
+(`Esc` or `q` returns to the bar):
+
+* `↑`/`↓` (or `j`/`k`) move the selection, `Enter`/`→` expands an alias to
+  show its named args, `←` collapses.
+* `n` — wizard for a new alias: name → shortcuts (comma-separated, may be
+  empty) → linux command (use `{input}` where the input goes) → macos
+  command (empty = same as linux).
+* `a` — wizard for a new named argument on the selected alias: key → value.
+* `d` — delete the selection: an arg row drops that argument, an alias row
+  drops the whole alias (built-ins refuse; override them instead).
+
+Every change is saved to `store.json` immediately.
 
 ## Storage
 
@@ -92,6 +132,26 @@ bind -n M-d run -b 'xconsoler'
 press `alt+d` in the bar to hide it, `Ctrl+C` to quit. Without tmux, use the
 SSH summon flow below, or just run `xconsoler` in a spare terminal/tab and
 use `alt+d` to toggle the bar.
+
+## Desktop global hotkey (X11 / XFCE)
+
+On a real desktop, register a **system-wide** shortcut so the long bar pops
+up anywhere — no terminal, no tmux. `scripts/xc-bar` toggles the bar in its
+own window; `scripts/xc-key` registers/re-binds the XFCE hotkey:
+
+```sh
+sudo install -m 0755 scripts/xc-bar scripts/xc-key /usr/local/bin/
+
+# register alt+d -> xc-bar in the running XFCE session (applied live):
+xc-key alt+d        # or, say: xc-key ctrl+g
+```
+
+`xc-bar` spawns a `gnome-terminal` window (`--class=XConsoler`, 140x14 near
+the top) with a dedicated 0.7-transparent GNOME Terminal profile — override
+the opacity with e.g. `XC_TRANS=85 xc-bar` — and runs
+`xconsoler --summon` inside it. Calling it again while the bar is up kills
+the bar instead of opening a second one, and a successful run dismisses it
+automatically, Spotlight-style.
 
 ## SSH deployment (no tmux)
 

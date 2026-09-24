@@ -1,0 +1,21 @@
+#!/bin/sh
+# xc-key <alt+d|ctrl+g|...>: (re)register the XFCE system-wide summon key.
+# Requires the desktop user's dbus (run inside the session, or set
+# DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus).
+set -u
+[ -n "$1" ] || { echo "usage: xc-key alt+d"; exit 1; }
+KEY=$(printf '%s' "$1" | awk -F+ '{
+    m = $1; c = tolower($2)
+    if (m == "alt") m = "<Alt>"; else if (m == "ctrl") m = "<Primary>"
+    else { print "BAD_MODIFIER" ; exit }
+    print m c
+}')
+[ "$KEY" != "BAD_MODIFIER" ] || { echo "unsupported key spec: $1"; exit 1; }
+CH=xfce4-keyboard-shortcuts
+# Drop any previous custom command pointing at xc-bar (idempotent re-bind).
+for old in $(xfconf-query -c "$CH" -l 2>/dev/null | grep '^/commands/custom/'); do
+    v=$(xfconf-query -c "$CH" -p "$old" 2>/dev/null) || continue
+    [ "$v" = "xc-bar" ] && xfconf-query -c "$CH" -p "$old" -r -f 2>/dev/null
+done
+xfconf-query -c "$CH" -p "/commands/custom/${KEY}" -n -t string -s "xc-bar" \
+    && echo "xconsoler global key: ${KEY} -> xc-bar"

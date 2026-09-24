@@ -9,6 +9,9 @@ use crate::storage::Store;
 pub enum Candidate {
     Alias { name: String },
     History { idx: usize },
+    /// Named-arg sub-candidate: the input is `<alias> <partial>` and `key`
+    /// is one of that alias's named arguments.
+    Arg { alias: String, key: String },
 }
 
 const RECENCY_BONUS: usize = 40;
@@ -77,6 +80,45 @@ pub fn candidates(
     scored.into_iter().take(limit).map(|t| t.3).collect()
 }
 
+/// Named-arg sub-candidates for a raw input of the form `<trigger> <partial>`.
+/// A bare `br` (no whitespace yet) keeps the normal history/alias ranking;
+/// once there is a space the alias's args take over, ranked by fuzzy score on
+/// the key (every key when the partial is empty), ties by key order.
+pub fn arg_candidates(aliases: &[AliasDef], input: &str, limit: usize) -> Vec<Candidate> {
+    let mut parts = input.splitn(2, char::is_whitespace);
+    let head = parts.next().unwrap_or("");
+    let Some(rest) = parts.next() else {
+        return Vec::new();
+    };
+    let Some(def) = alias::resolve(aliases, head) else {
+        return Vec::new();
+    };
+    if def.args.is_empty() {
+        return Vec::new();
+    }
+    let partial = rest.trim();
+    let mut scored: Vec<(i32, &String)> = def
+        .args
+        .keys()
+        .filter_map(|k| {
+            if partial.is_empty() {
+                Some((0, k))
+            } else {
+                fuzzy::score(partial, k).map(|s| (s, k))
+            }
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, k)| Candidate::Arg {
+            alias: def.name.clone(),
+            key: k.clone(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +126,40 @@ mod tests {
 
     fn history(alias: &str, input: &str, ts: u64) -> HistoryEntry {
         HistoryEntry::new(alias, input, ts)
+    }
+
+    fn with_args() -> Vec<AliasDef> {
+        let mut def = alias::defaults().remove(0); // browser
+        def.args.insert("baidu".to_string(), "https://www.baidu.com".to_string());
+        def.args.insert("gh".to_string(), "https://github.com".to_string());
+        vec![def]
+    }
+
+    #[test]
+    fn arg_candidates_need_a_space_after_the_trigger() {
+        let aliases = with_args();
+        assert!(arg_candidates(&aliases, "br", 8).is_empty(), "bare alias");
+        assert!(arg_candidates(&aliases, "nope x", 8).is_empty(), "unknown head");
+        assert!(arg_candidates(&aliases, "clipboard x", 8).is_empty(), "no args");
+    }
+
+    #[test]
+    fn arg_candidates_list_and_filter_keys() {
+        let aliases = with_args();
+        assert_eq!(
+            arg_candidates(&aliases, "br ", 8),
+            vec![
+                Candidate::Arg { alias: "browser".to_string(), key: "baidu".to_string() },
+                Candidate::Arg { alias: "browser".to_string(), key: "gh".to_string() },
+            ],
+            "empty partial lists every key, ties by key order"
+        );
+        assert_eq!(
+            arg_candidates(&aliases, "br bai", 8),
+            vec![Candidate::Arg { alias: "browser".to_string(), key: "baidu".to_string() }]
+        );
+        assert!(arg_candidates(&aliases, "br zzz", 8).is_empty(), "no key matches");
+        assert_eq!(arg_candidates(&aliases, "br ", 1).len(), 1, "limit applies");
     }
 
     #[test]
