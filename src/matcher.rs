@@ -7,11 +7,18 @@ use crate::storage::Store;
 /// A selectable completion candidate.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Candidate {
-    Alias { name: String },
-    History { idx: usize },
+    Alias {
+        name: String,
+    },
+    History {
+        idx: usize,
+    },
     /// Named-arg sub-candidate: the input is `<alias> <partial>` and `key`
     /// is one of that alias's named arguments.
-    Arg { alias: String, key: String },
+    Arg {
+        alias: String,
+        key: String,
+    },
 }
 
 const RECENCY_BONUS: usize = 40;
@@ -20,7 +27,8 @@ const ALIAS_BONUS: i32 = 15;
 
 /// Rank candidates for `query` (whitespace-trimmed).
 ///
-/// * Empty query: newest-first history entries, then aliases, up to `limit`.
+/// * Empty query: the most recent history entries only (newest first, no
+///   alias rows), up to `limit`.
 /// * Otherwise: each history entry is scored with
 ///   `fuzzy::score(query, "<entry_label> <input>")` plus a recency bonus of
 ///   `40 - idx/250`; each alias is scored with
@@ -34,18 +42,11 @@ pub fn candidates(
 ) -> Vec<Candidate> {
     let query = query.trim();
     if query.is_empty() {
-        let mut out: Vec<Candidate> = (0..store.history.len().min(limit))
+        // Recent history only: an empty bar shows what was run last, never
+        // aliases (they come back as soon as a query character is typed).
+        return (0..store.history.len().min(limit))
             .map(|idx| Candidate::History { idx })
             .collect();
-        for def in aliases {
-            if out.len() >= limit {
-                break;
-            }
-            out.push(Candidate::Alias {
-                name: def.name.clone(),
-            });
-        }
-        return out;
     }
 
     // (score, kind_rank, order, candidate): history kind_rank 0, alias 1.
@@ -129,9 +130,12 @@ mod tests {
     }
 
     fn with_args() -> Vec<AliasDef> {
-        let mut def = alias::defaults().remove(0); // browser
-        def.args.insert("baidu".to_string(), "https://www.baidu.com".to_string());
-        def.args.insert("gh".to_string(), "https://github.com".to_string());
+        let mut def = alias::defaults().remove(0); // br (builtin)
+        def.args.clear(); // fixture: exactly the args below
+        def.args
+            .insert("baidu".to_string(), "https://www.baidu.com".to_string());
+        def.args
+            .insert("gh".to_string(), "https://github.com".to_string());
         vec![def]
     }
 
@@ -139,8 +143,14 @@ mod tests {
     fn arg_candidates_need_a_space_after_the_trigger() {
         let aliases = with_args();
         assert!(arg_candidates(&aliases, "br", 8).is_empty(), "bare alias");
-        assert!(arg_candidates(&aliases, "nope x", 8).is_empty(), "unknown head");
-        assert!(arg_candidates(&aliases, "clipboard x", 8).is_empty(), "no args");
+        assert!(
+            arg_candidates(&aliases, "nope x", 8).is_empty(),
+            "unknown head"
+        );
+        assert!(
+            arg_candidates(&alias::defaults(), "cd x", 8).is_empty(),
+            "no args"
+        );
     }
 
     #[test]
@@ -149,53 +159,90 @@ mod tests {
         assert_eq!(
             arg_candidates(&aliases, "br ", 8),
             vec![
-                Candidate::Arg { alias: "browser".to_string(), key: "baidu".to_string() },
-                Candidate::Arg { alias: "browser".to_string(), key: "gh".to_string() },
+                Candidate::Arg {
+                    alias: "br".to_string(),
+                    key: "baidu".to_string()
+                },
+                Candidate::Arg {
+                    alias: "br".to_string(),
+                    key: "gh".to_string()
+                },
             ],
             "empty partial lists every key, ties by key order"
         );
         assert_eq!(
             arg_candidates(&aliases, "br bai", 8),
-            vec![Candidate::Arg { alias: "browser".to_string(), key: "baidu".to_string() }]
+            vec![Candidate::Arg {
+                alias: "br".to_string(),
+                key: "baidu".to_string()
+            }]
         );
-        assert!(arg_candidates(&aliases, "br zzz", 8).is_empty(), "no key matches");
+        assert!(
+            arg_candidates(&aliases, "br zzz", 8).is_empty(),
+            "no key matches"
+        );
         assert_eq!(arg_candidates(&aliases, "br ", 1).len(), 1, "limit applies");
     }
 
+    /// Empty input shows the recent history only - no alias rows, even
+    /// though the limit would leave room for them. Whitespace counts as
+    /// empty.
     #[test]
-    fn empty_query_lists_history_then_aliases() {
+    fn empty_query_lists_recent_history_only() {
         let mut store = Store::default();
-        store.history.push(history("browser", "a", 2));
-        store.history.push(history("browser", "b", 1));
+        store.history.push(history("br", "a", 2));
+        store.history.push(history("br", "b", 1));
         let aliases = alias::defaults();
 
-        let out = candidates(&store, &aliases, "   ", 3);
+        let out = candidates(&store, &aliases, "   ", 10);
         assert_eq!(
             out,
-            vec![
-                Candidate::History { idx: 0 },
-                Candidate::History { idx: 1 },
-                Candidate::Alias {
-                    name: "browser".to_string()
-                },
-            ]
+            vec![Candidate::History { idx: 0 }, Candidate::History { idx: 1 },]
         );
+        assert!(
+            out.iter().all(|c| !matches!(c, Candidate::Alias { .. })),
+            "aliases stay out of the empty-input list: {out:?}"
+        );
+    }
+
+    #[test]
+    fn empty_query_without_history_is_empty_even_with_aliases() {
+        let store = Store::default();
+        for query in ["", "  "] {
+            assert_eq!(
+                candidates(&store, &alias::defaults(), query, 10),
+                Vec::new(),
+                "query {query:?}"
+            );
+        }
     }
 
     #[test]
     fn empty_query_limit_one_history_only() {
         let mut store = Store::default();
-        store.history.push(history("browser", "a", 2));
-        store.history.push(history("browser", "b", 1));
+        store.history.push(history("br", "a", 2));
+        store.history.push(history("br", "b", 1));
         let out = candidates(&store, &alias::defaults(), "", 1);
         assert_eq!(out, vec![Candidate::History { idx: 0 }]);
     }
 
     #[test]
+    fn empty_query_caps_the_recent_history_at_the_limit() {
+        let mut store = Store::default();
+        for i in 0..12 {
+            store.history.push(history("br", &format!("x{i}"), 12 - i));
+        }
+        let out = candidates(&store, &alias::defaults(), "", 10);
+        assert_eq!(out.len(), 10, "limit caps the recent list: {out:?}");
+        assert_eq!(out[0], Candidate::History { idx: 0 }, "newest first");
+        assert_eq!(out[9], Candidate::History { idx: 9 });
+    }
+
+    #[test]
     fn newer_history_outranks_older_and_alias() {
         let mut store = Store::default();
-        store.history.push(history("browser", "newest", 20));
-        store.history.push(history("browser", "older", 10));
+        store.history.push(history("br", "newest", 20));
+        store.history.push(history("br", "older", 10));
         let out = candidates(&store, &alias::defaults(), "br", 10);
         assert_eq!(
             out,
@@ -203,26 +250,35 @@ mod tests {
                 Candidate::History { idx: 0 },
                 Candidate::History { idx: 1 },
                 Candidate::Alias {
-                    name: "browser".to_string()
-                },
-                // "br" is also a subsequence of "clipboard cd", but scores lower
-                Candidate::Alias {
-                    name: "clipboard".to_string()
+                    name: "br".to_string()
                 },
             ]
         );
     }
 
+    /// Fuzzy-typing `b` / `c` resolves to exactly the `br` / `cd` builtins;
+    /// a trailing space (`br ` / `cd ` before Enter) changes nothing.
     #[test]
-    fn alias_name_match() {
+    fn single_letter_query_matches_exactly_one_builtin() {
         let store = Store::default();
-        let out = candidates(&store, &alias::defaults(), "clip", 5);
-        assert_eq!(
-            out,
-            vec![Candidate::Alias {
-                name: "clipboard".to_string()
-            }]
-        );
+        for query in ["b", "br", "br "] {
+            assert_eq!(
+                candidates(&store, &alias::defaults(), query, 5),
+                vec![Candidate::Alias {
+                    name: "br".to_string()
+                }],
+                "query {query:?}"
+            );
+        }
+        for query in ["c", "cd", "cd "] {
+            assert_eq!(
+                candidates(&store, &alias::defaults(), query, 5),
+                vec![Candidate::Alias {
+                    name: "cd".to_string()
+                }],
+                "query {query:?}"
+            );
+        }
     }
 
     #[test]
@@ -237,7 +293,7 @@ mod tests {
     fn limit_truncates_ranked_results() {
         let mut store = Store::default();
         for i in 0..5 {
-            store.history.push(history("browser", &format!("x{i}"), i));
+            store.history.push(history("br", &format!("x{i}"), i));
         }
         let out = candidates(&store, &alias::defaults(), "x", 2);
         assert_eq!(

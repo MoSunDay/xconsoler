@@ -88,5 +88,4 @@ mod tests {
         assert_ne!(channels(SELECT_BG), channels(BG));
         assert_ne!(channels(CURSOR), channels(BG));
     }
-
 }

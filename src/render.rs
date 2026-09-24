@@ -1,7 +1,9 @@
 //! Frame rendering. All colours live in one place - `crate::theme` - so
 //! call sites never hard-code raw `Color` values. The theme is the
-//! terminator-rust kanagawa port; its 0.7 opacity policy means no explicit
-//! cell backgrounds outside the selection/cursor inks.
+//! terminator-rust kanagawa port; the shown bar is the input box, the
+//! candidate list under it (or the command palette while that is open) and
+//! one status/hints row, painted over the host terminal's background, so
+//! only the cursor cell and the selected candidate row carry a background.
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -9,24 +11,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::alias;
-use crate::exec;
+use crate::commands;
 use crate::keyspec;
-use crate::matcher::Candidate;
-use crate::platform::{self, Platform};
+use crate::render_list::draw_candidates;
 use crate::settings_view;
-use crate::state::{self, App, Mode, Visibility, CANDIDATE_LIMIT};
-use crate::theme::{ACCENT, BORDER, CURSOR, ERR, MUTED, OK, SELECT_BG, SUBTLE, TEXT};
+use crate::state::{App, Mode, Visibility};
+use crate::theme::{ACCENT, BORDER, CURSOR, ERR, MUTED, OK, SELECT_BG, TEXT};
 
-/// Bar title: the brand mark in text - accent chevron + cursor-coloured block,
-/// the terminal echo of `assets/icon.svg` - in front of the wordmark.
-fn brand_title() -> Line<'static> {
-    Line::from(vec![
-        Span::styled(" ❯", Style::new().fg(ACCENT)),
-        Span::styled("▌", Style::new().fg(CURSOR)),
-        Span::styled(" xconsoler ", Style::new().fg(ACCENT)),
-    ])
-}
+/// Input box height in rows: top border, input line, bottom border.
+pub(crate) const INPUT_BOX_H: u16 = 3;
 
 /// Hidden-mode one-liner; the wake key is injected at render time so a
 /// custom `--wake-key` / stored config shows the real binding.
@@ -34,35 +27,41 @@ fn hidden_hint(wake: &str) -> String {
     format!(" xconsoler hidden — {wake} wake · Ctrl+C quit ")
 }
 
-/// Key-hints line shown under the list when there is no status message.
-fn keys_hint(wake: &str) -> String {
-    format!(" {wake} hide · Enter run · ↑↓/Tab select · Ctrl+U clear · Ctrl+C quit ")
+/// Key-hints row under the list, shown while there is no status message.
+/// A narrow bar drops the least essential hints whole (no mid-word clipping):
+/// `Ctrl+C quit` goes first, the wake/run/select trio always survives.
+fn keys_hint(wake: &str, width: usize) -> String {
+    let segs = [
+        format!("{wake} hide"),
+        "Enter run".to_string(),
+        "↑↓/Tab select".to_string(),
+        "Ctrl+U clear".to_string(),
+        "Ctrl+C quit".to_string(),
+    ];
+    let mut keep = segs.len();
+    while keep > 1 && hint_width(&segs[..keep]) > width {
+        keep -= 1;
+    }
+    format!(" {} ", segs[..keep].join(HINT_SEP))
 }
-const HELP_TITLE: &str = " : commands ";
 
-/// Help lines shown while the input starts with `:`; the first word of each
-/// line is the token being explained.
-const HELP_LINES: [&str; 7] = [
-    ":add <name>[,<short>...] <linux-cmd> // <macos-cmd>",
-    ":del <name>",
-    ":arg <name> <key> <value...> — set a named argument",
-    ":unarg <name> <key> — remove a named argument",
-    ":help — show this help",
-    "{input} — your input, shell-quoted into the command",
-    "@stdin — your input is piped to the command's stdin",
-];
+/// Separator between two hints.
+const HINT_SEP: &str = " · ";
 
-const SLASH_TITLE: &str = " / commands ";
+/// Rendered width of the joined hints: text + separators + the two spaces
+/// `keys_hint` pads the line with.
+fn hint_width(segs: &[String]) -> usize {
+    let text: usize = segs.iter().map(|s| s.chars().count()).sum();
+    let seps = HINT_SEP.chars().count() * segs.len().saturating_sub(1);
+    text + seps + 2
+}
 
-/// Help lines shown while the input starts with `/`.
-const SLASH_LINES: [&str; 1] = ["/settings — open the settings page"];
-
-/// Draw one frame: the hidden one-liner or the full launcher layout. In
-/// settings mode the whole screen belongs to the settings page — the
-/// long-bar/candidates layout is not drawn at all.
+/// Draw one frame: the hidden one-liner, the shown input box, or the settings
+/// page. In settings mode the whole screen belongs to the settings page - the
+/// bar layout is not drawn.
 pub fn draw(f: &mut Frame, app: &App) {
-    // Blank the frame first: switching visibility or shrinking the list must
-    // not leave stale cells behind (ratatui only diffs what is re-rendered).
+    // Blank the frame first: switching visibility must not leave stale cells
+    // behind (ratatui only diffs what is re-rendered).
     f.render_widget(Clear, f.area());
     match app.mode {
         Mode::Normal => match app.visibility {
@@ -74,34 +73,77 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_hidden(f: &mut Frame, app: &App) {
+    let area = f.area();
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             hidden_hint(&keyspec::describe(&app.wake)),
             Style::new().fg(MUTED),
         ))),
-        row_rect(f.area().width, 0, 1),
+        clip(area, row_rect(area.width, 0, 1)),
     );
 }
 
+/// Shown mode: the input box, then the command palette while it is open
+/// (take precedence over the list), otherwise the candidate list, then one
+/// row carrying the status message or the key hints.
 fn draw_shown(f: &mut Frame, app: &App) {
     let width = f.area().width;
-    let mut y = draw_input_bar(f, app, width);
-
-    let cands = state::candidates(app);
-    if app.input.starts_with(':') {
-        y = draw_help(f, width, y, HELP_TITLE, &HELP_LINES);
-    } else if app.input.starts_with('/') {
-        y = draw_help(f, width, y, SLASH_TITLE, &SLASH_LINES);
-    } else if !cands.is_empty() {
-        y = draw_list(f, app, &cands, width, y);
+    let mut y = draw_input_box(f, app, width);
+    if app.palette.is_some() {
+        y = draw_palette(f, app, width, y);
+    } else {
+        y = draw_candidates(f, app, width, y);
     }
     draw_status(f, app, width, y);
 }
 
-/// Full-width input bar: `❯ ` + input + a reverse-space cursor at the end.
-fn draw_input_bar(f: &mut Frame, app: &App, width: u16) -> u16 {
-    let rect = row_rect(width, 0, 3);
-    let block = main_block_line(brand_title());
+/// Command palette under the input box: one row per built-in `:`/`/` command,
+/// Up/Down to move, Enter to accept, Esc to close. Scrolls so the selection
+/// stays visible; a terminal with no room degrades to no list.
+fn draw_palette(f: &mut Frame, app: &App, width: u16, y: u16) -> u16 {
+    let total = commands::len();
+    // The block needs 2 border rows and the status row 1.
+    let free = f.area().height.saturating_sub(y).saturating_sub(1) as usize;
+    let rows = total.min(free.saturating_sub(2));
+    if rows == 0 {
+        return y;
+    }
+    let sel = app.palette.unwrap_or(0).min(total - 1);
+    let start = sel.saturating_sub(rows - 1).min(total - rows);
+    let layout = row_rect(width, y, (rows as u16).saturating_add(2));
+    let block = main_block(&format!(" commands \u{b7} {total} "));
+    let inner = block.inner(layout);
+    let sel_style = Style::new().bg(SELECT_BG).fg(TEXT);
+    let mut lines = Vec::with_capacity(rows);
+    for (i, spec) in commands::ALL.iter().enumerate().skip(start).take(rows) {
+        let segs = vec![
+            (format!(" {} ", spec.token), Style::new().fg(ACCENT)),
+            (spec.desc.to_string(), Style::new().fg(MUTED)),
+        ];
+        lines.push(segments_line(
+            segs,
+            inner.width as usize,
+            i == sel,
+            sel_style,
+        ));
+    }
+    f.render_widget(Paragraph::new(lines).block(block), clip(f.area(), layout));
+    y.saturating_add(rows as u16).saturating_add(2)
+}
+
+/// The bar block: rounded border, no title.
+fn input_block() -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(BORDER))
+}
+
+/// Full-width input box: prompt + input + a reverse-space cursor at the end.
+/// Returns the first row under the box.
+fn draw_input_box(f: &mut Frame, app: &App, width: u16) -> u16 {
+    let rect = clip(f.area(), row_rect(width, 0, INPUT_BOX_H));
+    let block = input_block();
     let inner = block.inner(rect);
     let budget = inner.width.saturating_sub(3) as usize; // "❯ " + cursor cell
     let shown: String = app.input.chars().take(budget).collect();
@@ -114,169 +156,27 @@ fn draw_input_bar(f: &mut Frame, app: &App, width: u16) -> u16 {
         .block(block),
         rect,
     );
-    3
+    INPUT_BOX_H
 }
 
-/// Candidate list under the bar. Returns the next free row.
-/// List block title: per-kind row counts. Named-arg rows are only
-/// mentioned when present (they take over the list while typing
-/// `<alias> <partial>`).
-fn list_title(cands: &[Candidate], rows: usize) -> String {
-    let shown = &cands[..rows.min(cands.len())];
-    let hist = shown
-        .iter()
-        .filter(|c| matches!(c, Candidate::History { .. }))
-        .count();
-    let args = shown
-        .iter()
-        .filter(|c| matches!(c, Candidate::Arg { .. }))
-        .count();
-    let mut parts = vec![
-        format!("{hist} history"),
-        format!("{} alias", shown.len() - hist - args),
-    ];
-    if args > 0 {
-        parts.push(format!("{args} args"));
-    }
-    format!(" matches · {} ", parts.join(" · "))
-}
-
-fn draw_list(f: &mut Frame, app: &App, cands: &[Candidate], width: u16, y: u16) -> u16 {
-    let rows = cands.len().min(CANDIDATE_LIMIT);
-    let title = list_title(cands, rows);
-    let rect = row_rect(width, y, rows as u16 + 2);
-    let block = main_block(&title);
-    let inner = block.inner(rect);
-    let sel_style = Style::new().bg(SELECT_BG).fg(TEXT);
-    // Same clamp as `state::selected` so the highlight matches what Enter runs.
-    let cursor = app.cursor.min(rows.saturating_sub(1));
-    let pf = platform::current();
-
-    let lines: Vec<Line> = cands
-        .iter()
-        .take(rows)
-        .enumerate()
-        .map(|(i, cand)| {
-            let segs = match cand {
-                Candidate::History { idx } => history_segments(app, *idx),
-                Candidate::Alias { name } => alias_segments(app, name, pf),
-                Candidate::Arg { alias, key } => arg_row_segments(app, alias, key),
-            };
-            segments_line(segs, inner.width as usize, i == cursor, sel_style)
-        })
-        .collect();
-    f.render_widget(Paragraph::new(lines).block(block), rect);
-    rect.y + rect.height
-}
-
-/// `:`/`/` command help block replacing the list. Returns the next free row.
-fn draw_help(f: &mut Frame, width: u16, y: u16, title: &str, lines: &[&str]) -> u16 {
-    let rect = row_rect(width, y, lines.len() as u16 + 2);
-    let block = main_block(title);
-    let lines: Vec<Line> = lines
-        .iter()
-        .map(|l| match l.split_once(' ') {
-            Some((token, rest)) => Line::from(vec![
-                Span::styled(token, Style::new().fg(ACCENT)),
-                Span::styled(format!(" {rest}"), Style::new().fg(SUBTLE)),
-            ]),
-            None => Line::from(Span::styled(*l, Style::new().fg(SUBTLE))),
-        })
-        .collect();
-    f.render_widget(Paragraph::new(lines).block(block), rect);
-    rect.y + rect.height
-}
-
-/// One line below the list (or bar): status message or key hints.
+/// One line under the list (or box): the app's transient status message
+/// (ok / error mark with the message), else the muted key hints.
 fn draw_status(f: &mut Frame, app: &App, width: u16, y: u16) {
-    if y >= f.area().height {
-        return;
-    }
     let line = match &app.status {
-        Some((true, msg)) => Line::from(vec![
-            Span::styled("✓ ", Style::new().fg(OK)),
-            Span::styled(msg.clone(), Style::new().fg(OK)),
-        ]),
-        Some((false, msg)) => Line::from(vec![
-            Span::styled("✗ ", Style::new().fg(ERR)),
-            Span::styled(msg.clone(), Style::new().fg(ERR)),
-        ]),
+        Some((ok, msg)) => {
+            let (mark, color) = if *ok { ("✓ ", OK) } else { ("✗ ", ERR) };
+            Line::from(vec![
+                Span::styled(mark, Style::new().fg(color)),
+                Span::styled(msg.clone(), Style::new().fg(color)),
+            ])
+        }
         None => Line::from(Span::styled(
-            keys_hint(&keyspec::describe(&app.wake)),
+            keys_hint(&keyspec::describe(&app.wake), width as usize),
             Style::new().fg(MUTED),
         )),
     };
-    f.render_widget(Paragraph::new(line), row_rect(width, y, 1));
-}
-
-/// History row: `↻ <entry label> <recorded input>`.
-fn history_segments(app: &App, idx: usize) -> Vec<(String, Style)> {
-    match app.store.history.get(idx) {
-        Some(entry) => {
-            let label = match alias::resolve(&app.aliases, &entry.alias) {
-                Some(def) => alias::entry_label(def).to_string(),
-                None => entry.alias.clone(),
-            };
-            vec![
-                ("↻ ".into(), Style::new().fg(MUTED)),
-                (label, Style::new().fg(ACCENT)),
-                (" ".into(), Style::new().fg(TEXT)),
-                (entry.input(), Style::new().fg(TEXT)),
-            ]
-        }
-        None => vec![("…".into(), Style::new().fg(MUTED))],
-    }
-}
-
-/// Alias row: `★ <label> · <command template for the current platform>` —
-/// or, when the input is `<this alias> <rest>`, a preview of the input the
-/// command will receive (named args resolved): `★ br · → https://…`.
-fn alias_segments(app: &App, name: &str, pf: Platform) -> Vec<(String, Style)> {
-    match alias::resolve(&app.aliases, name) {
-        Some(def) => {
-            let mut parts = app.input.trim().splitn(2, char::is_whitespace);
-            let head = parts.next().unwrap_or("");
-            let rest = parts.next().unwrap_or("");
-            let is_trigger = !rest.trim().is_empty()
-                && alias::resolve(&app.aliases, head).is_some_and(|h| h.name == def.name);
-            if is_trigger {
-                let resolved = exec::resolve_args(def, rest);
-                return vec![
-                    ("★ ".into(), Style::new().fg(ACCENT)),
-                    (alias::label(def), Style::new().fg(ACCENT)),
-                    (" · ".into(), Style::new().fg(SUBTLE)),
-                    ("→ ".into(), Style::new().fg(MUTED)),
-                    (resolved, Style::new().fg(TEXT)),
-                ];
-            }
-            let cmd = match pf {
-                Platform::Linux => def.linux.as_deref(),
-                Platform::Macos => def.macos.as_deref(),
-            }
-            .unwrap_or("—");
-            vec![
-                ("★ ".into(), Style::new().fg(ACCENT)),
-                (alias::label(def), Style::new().fg(ACCENT)),
-                (" · ".into(), Style::new().fg(SUBTLE)),
-                (cmd.to_string(), Style::new().fg(SUBTLE)),
-            ]
-        }
-        None => vec![("★ …".into(), Style::new().fg(MUTED))],
-    }
-}
-
-/// Named-arg sub-candidate row: `↳ <key> · <value>` (shown when the input
-/// is `<alias> `).
-fn arg_row_segments(app: &App, alias: &str, key: &str) -> Vec<(String, Style)> {
-    let value = alias::resolve(&app.aliases, alias)
-        .and_then(|d| d.args.get(key).cloned())
-        .unwrap_or_else(|| "…".to_string());
-    vec![
-        ("↳ ".into(), Style::new().fg(MUTED)),
-        (key.to_string(), Style::new().fg(ACCENT)),
-        (" · ".into(), Style::new().fg(SUBTLE)),
-        (value, Style::new().fg(SUBTLE)),
-    ]
+    // Clipped: a terminal with no row under the list degrades to a no-op.
+    f.render_widget(Paragraph::new(line), clip(f.area(), row_rect(width, y, 1)));
 }
 
 /// Lay out styled segments on one row: truncation is unicode-safe (whole
@@ -321,25 +221,17 @@ pub(crate) fn segments_line(
     Line::from(spans)
 }
 
-/// Shared block preset: rounded borders, subtle title. Shared with the
+/// Shared block preset: rounded borders, accent title. Shared with the
 /// settings page.
 pub(crate) fn main_block(title: &str) -> Block<'static> {
-    main_block_line(Line::from(Span::styled(
-        title.to_string(),
-        Style::new().fg(ACCENT),
-    )))
-}
-
-/// Same preset for a multi-span title (the input bar carries the brand mark).
-fn main_block_line(title: Line<'static>) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(BORDER))
-        .title(title)
+        .title(Span::styled(title.to_string(), Style::new().fg(ACCENT)))
 }
 
-fn row_rect(width: u16, y: u16, height: u16) -> Rect {
+pub(crate) fn row_rect(width: u16, y: u16, height: u16) -> Rect {
     Rect {
         x: 0,
         y,
@@ -348,154 +240,229 @@ fn row_rect(width: u16, y: u16, height: u16) -> Rect {
     }
 }
 
+/// Clip a layout rect to the frame: a terminal smaller than the layout must
+/// never hand a widget a rect outside the buffer.
+pub(crate) fn clip(area: Rect, rect: Rect) -> Rect {
+    rect.intersection(area)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::record;
+    use crate::render_testkit::{
+        app_with_history, app_with_recent_history, bg_cells, bg_rows, draw_on, draw_once, row_of,
+    };
+    use crate::state;
     use crate::storage::Store;
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
 
     #[test]
-    fn bar_title_carries_the_brand_mark() {
-        let text = draw_once(&state::new(Store::default(), false));
+    fn shown_frame_draws_the_box_the_list_and_the_key_hints() {
+        let text = draw_once(&app_with_history());
+        assert_eq!(text.matches("❯ br").count(), 1, "input drawn once: {text}");
+        assert_eq!(row_of(&text, "❯ br"), Some(1), "content row: {text}");
+        // Input box first, candidate list under it.
+        let top = text.lines().next().unwrap_or("");
         assert!(
-            text.contains("❯▌ xconsoler"),
-            "input-bar title lost the mark: {text}"
+            top.starts_with('╭') && top.ends_with('╮'),
+            "box border row: {top}"
+        );
+        assert_eq!(text.matches('╭').count(), 2, "box + list block: {text}");
+        assert_eq!(
+            row_of(&text, "↻ br docs"),
+            Some(INPUT_BOX_H as usize + 1),
+            "first list row under the box: {text}"
+        );
+        assert!(text.contains("★ br ·"), "alias row: {text}");
+        assert!(
+            text.contains("matches · 1 history · 1 alias"),
+            "list title: {text}"
+        );
+        assert!(text.contains("alt+d hide"), "key hints: {text}");
+        assert!(text.contains("Enter run"), "key hints: {text}");
+    }
+
+    #[test]
+    fn colon_and_settings_inputs_draw_no_candidate_list() {
+        let mut app = app_with_history();
+        app.input = ":".to_string();
+        let colon = draw_once(&app);
+        assert!(!colon.contains("matches ·"), "no list: {colon}");
+        assert!(!colon.contains('★'), "no list rows: {colon}");
+        assert_eq!(colon.matches('╭').count(), 1, "input box only: {colon}");
+        assert_eq!(row_of(&colon, "❯ :"), Some(1), "content row: {colon}");
+        assert!(colon.contains("Enter run"), "hints still drawn: {colon}");
+
+        app.input = "/settings".to_string();
+        let slash = draw_once(&app);
+        assert!(!slash.contains("matches ·"), "no list: {slash}");
+        assert_eq!(slash.matches('╭').count(), 1, "input box only: {slash}");
+        assert_eq!(
+            row_of(&slash, "❯ /settings"),
+            Some(1),
+            "typed input: {slash}"
         );
     }
 
     #[test]
-    fn list_title_counts_kinds_and_hides_empty_args() {
-        let hist = vec![Candidate::History { idx: 0 }];
-        assert_eq!(list_title(&hist, 1), " matches · 1 history · 0 alias ");
-        let mixed = vec![
-            Candidate::History { idx: 0 },
-            Candidate::Alias { name: "browser".to_string() },
-            Candidate::Arg { alias: "browser".to_string(), key: "baidu".to_string() },
-        ];
-        assert_eq!(list_title(&mixed, 3), " matches · 1 history · 1 alias · 1 args ");
-    }
+    fn status_message_renders_under_the_list() {
+        let mut app = app_with_history();
+        let rows = state::candidates(&app).len();
+        let below = INPUT_BOX_H as usize + 2 + rows;
 
-    fn frame_text(terminal: &Terminal<TestBackend>) -> String {
-        let buf = terminal.backend().buffer();
-        let mut s = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                s.push_str(buf[(x, y)].symbol());
-            }
-            s.push('\n');
-        }
-        s
-    }
-
-    fn draw_once(app: &App) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
-        terminal.draw(|f| draw(f, app)).unwrap();
-        frame_text(&terminal)
-    }
-
-    #[test]
-    fn hidden_frame_shows_only_the_hint() {
-        let mut app = state::new(Store::default(), false);
-        app.visibility = Visibility::Hidden; // apps start Shown
-        let text = draw_once(&app);
-        assert!(text.contains("alt+d"));
-        assert!(text.contains("hidden"));
-        assert!(!text.contains("❯"));
-    }
-
-    #[test]
-    fn hints_reflect_a_custom_wake_key() {
-        let mut app = state::new(Store::default(), false);
-        app.wake = crate::keyspec::parse("ctrl+g").unwrap();
-        let shown_text = draw_once(&app);
-        assert!(shown_text.contains("ctrl+g hide"));
-        assert!(!shown_text.contains("alt+d"));
-        app.visibility = Visibility::Hidden;
-        let hidden_text = draw_once(&app);
-        assert!(hidden_text.contains("ctrl+g wake"));
-    }
-
-    #[test]
-    fn shown_frame_renders_bar_candidates_selection_and_status() {
-        let mut store = Store::default();
-        record(&mut store, "browser", "docs", 1);
-        let mut app = state::new(store, false);
-        app.cursor = 1; // selects the first alias row (browser)
-
-        let text = draw_once(&app);
-        assert!(text.contains("❯"));
-        assert!(text.contains("↻")); // history row
-        assert!(text.contains("★")); // alias rows
-        assert!(text.contains("browser (br)"));
-        assert!(text.contains("xdg-open")); // linux template of selected row
-        assert!(text.contains("alt+d hide")); // key hints (status None)
-    }
-
-    #[test]
-    fn status_line_replaces_key_hints() {
-        let mut app = state::new(Store::default(), false);
-        app.status = Some((true, "t ok: hello".to_string()));
+        app.status = Some((true, "br ok: docs".to_string()));
         let ok = draw_once(&app);
-        assert!(ok.contains("✓ t ok: hello"));
-        app.status = Some((false, "boom".to_string()));
+        assert_eq!(row_of(&ok, "✓ br ok: docs"), Some(below), "{ok}");
+        assert!(
+            !ok.contains("alt+d hide"),
+            "status replaces the hints: {ok}"
+        );
+
+        app.status = Some((false, "no match".to_string()));
         let err = draw_once(&app);
-        assert!(err.contains("✗ boom"));
+        assert_eq!(row_of(&err, "✗ no match"), Some(below), "{err}");
+        assert!(err.contains("↻ br docs"), "list stays: {err}");
     }
 
     #[test]
-    fn colon_prefix_swaps_list_for_help_block() {
-        let mut app = state::new(Store::default(), false);
-        app.input = ":add t echo {input}".to_string();
+    fn selection_and_cursor_paint_the_only_backgrounds() {
+        let app = app_with_history();
+        let painted = bg_cells(&app, 80, 14);
+        let cursor: Vec<_> = painted.iter().filter(|(_, _, c)| *c == CURSOR).collect();
+        assert_eq!(cursor.len(), 1, "one cursor cell: {painted:?}");
+        assert_eq!(cursor[0].1, 1, "cursor on the box content row: {painted:?}");
+        let sel: Vec<_> = painted.iter().filter(|(_, _, c)| *c == SELECT_BG).collect();
+        assert_eq!(sel.len(), 78, "selected row padded to inner width");
+        assert_eq!(
+            bg_rows(&painted, SELECT_BG),
+            std::iter::once(INPUT_BOX_H + 1).collect(),
+            "the top candidate row only: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn palette_draws_every_command_under_the_box() {
+        let mut app = app_with_history();
+        app.palette = Some(0);
         let text = draw_once(&app);
-        assert!(text.contains(":add"));
-        assert!(text.contains("{input}"));
-        assert!(text.contains("@stdin"));
-        assert!(!text.contains("★")); // list replaced by help
+        assert!(text.contains("commands"), "palette title: {text}");
+        for c in &commands::ALL {
+            assert!(text.contains(c.token), "missing {}: {text}", c.token);
+        }
+        assert!(text.contains(":add "), "token padded for width: {text}");
+        assert_eq!(
+            row_of(&text, ":add"),
+            Some(INPUT_BOX_H as usize + 1),
+            "first row under the box: {text}"
+        );
     }
 
     #[test]
-    fn no_candidates_draws_no_list_but_keeps_status() {
-        let mut app = state::new(Store::default(), false);
-        app.input = "zzz".to_string();
-        app.aliases.clear();
-        let text = draw_once(&app);
-        assert!(!text.contains("★"));
-        assert!(!text.contains("matches"));
-        assert!(text.contains("alt+d hide"));
-        assert!(text.contains("❯ zzz"));
+    fn palette_selected_row_paints_the_select_background() {
+        let mut app = app_with_history();
+        app.palette = Some(2);
+        let painted = bg_cells(&app, 80, 14);
+        let cursor = painted.iter().filter(|(_, _, c)| *c == CURSOR).count();
+        assert_eq!(cursor, 1, "still one cursor cell: {painted:?}");
+        let sel: Vec<_> = painted.iter().filter(|(_, _, c)| *c == SELECT_BG).collect();
+        assert!(!sel.is_empty(), "selected row painted: {painted:?}");
+        let rows: std::collections::BTreeSet<u16> = sel.iter().map(|(_, y, _)| *y).collect();
+        assert_eq!(
+            rows,
+            std::iter::once(INPUT_BOX_H + 3).collect(),
+            "the selected (third) row only: {painted:?}"
+        );
+        assert!(
+            sel.iter().all(|(x, _, _)| (1..=78).contains(x)),
+            "paint stays inside the block border: {painted:?}"
+        );
     }
 
-    /// Background-policy guard: only the selection row and the cursor block
-    /// may paint a background. Every other cell stays at the terminal default,
-    /// which the host terminal profile colours (see `scripts/xc-bar`).
     #[test]
-    fn only_selection_and_cursor_paint_backgrounds() {
-        let mut store = Store::default();
-        record(&mut store, "browser", "docs", 1);
-        let mut app = state::new(store, false);
-        app.cursor = 1; // selects the first alias row
+    fn palette_scrolls_the_selection_into_view() {
+        let mut app = app_with_history();
+        app.palette = Some(commands::len() - 1);
+        let text = draw_on(&app, 80, 8);
+        assert!(text.contains("/settings"), "last row visible: {text}");
+        assert!(text.contains("commands"), "title still drawn: {text}");
+    }
 
-        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
-        terminal.draw(|f| draw(f, &app)).unwrap();
-        let buf = terminal.backend().buffer();
+    #[test]
+    fn palette_in_tiny_terminals_does_not_panic() {
+        let mut app = app_with_history();
+        app.palette = Some(0);
+        for (w, h) in [
+            (0, 0),
+            (1, 1),
+            (2, 2),
+            (5, 4),
+            (80, 1),
+            (80, 2),
+            (80, INPUT_BOX_H),
+            (80, INPUT_BOX_H + 1),
+        ] {
+            let _ = draw_on(&app, w, h);
+        }
+    }
 
-        let mut sel_cells = 0;
-        let mut cursor_cells = 0;
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                match buf[(x, y)].style().bg {
-                    // `Clear` writes an explicit Reset - still terminal default.
-                    None => {}
-                    Some(ratatui::style::Color::Reset) => {}
-                    Some(c) if c == SELECT_BG => sel_cells += 1,
-                    Some(c) if c == CURSOR => cursor_cells += 1,
-                    Some(other) => panic!("unexpected painted background {other:?} at ({x},{y})"),
-                }
+    #[test]
+    fn tiny_and_zero_size_terminals_do_not_panic() {
+        let typed = app_with_history();
+        let mut with_status = app_with_history();
+        with_status.status = Some((false, "no match".to_string()));
+        // The empty bar draws the recent list; the typed one draws matches.
+        let recent = app_with_recent_history(12);
+        let mut recent_selected = app_with_recent_history(3);
+        recent_selected.cursor = 2;
+        for (w, h) in [
+            (0, 0),
+            (0, 5),
+            (1, 1),
+            (2, INPUT_BOX_H),
+            (5, 2),
+            (40, 6),
+            (40, INPUT_BOX_H + 2),
+            (80, 0),
+            (80, INPUT_BOX_H),
+            (80, INPUT_BOX_H + 1),
+            (80, INPUT_BOX_H + 2),
+        ] {
+            for a in [&typed, &with_status, &recent, &recent_selected] {
+                let _ = draw_on(a, w, h);
             }
         }
-        assert_eq!(sel_cells, 78); // inner width: 80 minus the two borders
-        assert_eq!(cursor_cells, 1); // one reverse-space cursor cell
+    }
+
+    #[test]
+    fn hidden_frame_shows_only_the_hint_with_a_custom_wake_key() {
+        let mut app = state::new(Store::default(), false);
+        app.visibility = Visibility::Hidden;
+        app.wake = keyspec::parse("alt+j").expect("fixture key");
+        let text = draw_once(&app);
+        assert!(text.contains("hidden"), "hint: {text}");
+        assert!(text.contains("alt+j"), "custom wake key: {text}");
+        assert!(!text.contains('╭'), "no box while hidden: {text}");
+    }
+
+    #[test]
+    fn key_hints_drop_whole_segments_on_a_narrow_bar() {
+        // 52 cells: the quarter-width bar on a 1920px screen.
+        let narrow = keys_hint("alt+d", 52);
+        assert!(narrow.contains("alt+d hide"), "{narrow}");
+        assert!(narrow.contains("Enter run"), "{narrow}");
+        assert!(narrow.contains("↑↓/Tab select"), "{narrow}");
+        assert!(!narrow.contains("Ctrl+C quit"), "{narrow}");
+        assert!(narrow.chars().count() <= 52, "overflows: {narrow}");
+    }
+
+    #[test]
+    fn key_hints_keep_every_segment_on_a_wide_bar() {
+        let wide = keys_hint("alt+d", 140);
+        assert!(wide.contains("Ctrl+U clear"), "{wide}");
+        assert!(wide.contains("Ctrl+C quit"), "{wide}");
+    }
+
+    #[test]
+    fn key_hints_never_shrink_past_the_wake_hint() {
+        assert_eq!(keys_hint("alt+d", 4), " alt+d hide ");
     }
 }

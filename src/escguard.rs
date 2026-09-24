@@ -178,11 +178,8 @@ mod tests {
         let esc_shift = key(KeyCode::Esc, KeyModifiers::SHIFT);
         assert_eq!(g.feed(esc_shift), vec![esc_shift]);
         assert!(!g.is_holding());
-        let esc_release = KeyEvent::new_with_kind(
-            KeyCode::Esc,
-            KeyModifiers::NONE,
-            KeyEventKind::Release,
-        );
+        let esc_release =
+            KeyEvent::new_with_kind(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Release);
         assert_eq!(g.feed(esc_release), vec![esc_release]);
         assert!(!g.is_holding());
     }

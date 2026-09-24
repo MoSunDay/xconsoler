@@ -9,7 +9,7 @@ use crate::matcher::{self, Candidate};
 use crate::storage::{self, Store};
 
 /// Max candidates shown (and ranked) at once.
-pub const CANDIDATE_LIMIT: usize = 8;
+pub const CANDIDATE_LIMIT: usize = 10;
 
 /// Whether the launcher bar is on screen. New apps start [`Visibility::Shown`]
 /// — a fresh launch must be visible, not look like it exited instantly.
@@ -42,18 +42,25 @@ pub struct App {
     pub quit: bool,
     /// The wake/sleep key, parsed from `store.config.wake_key`.
     pub wake: KeySpec,
+    /// The command-palette key, parsed from `store.config.command_key`.
+    pub command: KeySpec,
     /// Summon mode (started from a shell keybind): the wake key / Esc quit
     /// back to the prompt instead of hiding the bar.
     pub summon: bool,
     /// Which page owns keys/rendering: launcher bar or the settings screen.
     pub mode: Mode,
+    /// Command palette: `Some(selected row)` while it is open. Only ever set
+    /// while the bar is shown; `None` means closed.
+    pub palette: Option<usize>,
 }
 
 /// Build an app from a loaded store: **shown**, empty input, merged aliases.
-/// An unparsable stored wake key falls back to [`keyspec::DEFAULT`].
+/// An unparsable stored wake key falls back to [`keyspec::DEFAULT`]; an
+/// unparsable command-palette key to [`keyspec::DEFAULT_COMMAND`].
 pub fn new(store: Store, summon: bool) -> App {
     let aliases = storage::merge_aliases(&store.aliases);
     let wake = keyspec::parse(&store.config.wake_key).unwrap_or(keyspec::DEFAULT);
+    let command = keyspec::parse(&store.config.command_key).unwrap_or(keyspec::DEFAULT_COMMAND);
     App {
         store,
         aliases,
@@ -63,8 +70,10 @@ pub fn new(store: Store, summon: bool) -> App {
         status: None,
         quit: false,
         wake,
+        command,
         summon,
         mode: Mode::Normal,
+        palette: None,
     }
 }
 
@@ -100,14 +109,15 @@ mod tests {
 
     fn app_with_history() -> App {
         let mut store = Store::default();
-        record(&mut store, "browser", "a", 1);
-        record(&mut store, "browser", "b", 2);
+        record(&mut store, "br", "a", 1);
+        record(&mut store, "br", "b", 2);
         new(store, false)
     }
 
     fn app_with_named_arg() -> App {
         let mut store = Store::default();
-        let mut def = crate::alias::defaults().remove(0); // browser (`br`)
+        let mut def = crate::alias::defaults().remove(0); // br builtin
+        def.args.clear(); // fixture: exactly the args below
         def.builtin = false;
         def.args
             .insert("baidu".to_string(), "https://www.baidu.com".to_string());
@@ -119,27 +129,39 @@ mod tests {
     fn named_arg_context_lists_args_once_a_space_is_typed() {
         let mut app = app_with_named_arg();
         assert!(
-            candidates(&app).iter().all(|c| !matches!(c, Candidate::Arg { .. })),
+            candidates(&app)
+                .iter()
+                .all(|c| !matches!(c, Candidate::Arg { .. })),
             "empty input: normal ranking"
         );
         app.input = "br".to_string();
         assert!(
-            candidates(&app).iter().all(|c| !matches!(c, Candidate::Arg { .. })),
+            candidates(&app)
+                .iter()
+                .all(|c| !matches!(c, Candidate::Arg { .. })),
             "bare alias still ranks aliases"
         );
         app.input = "br ".to_string();
         assert_eq!(
             candidates(&app),
-            vec![Candidate::Arg { alias: "browser".to_string(), key: "baidu".to_string() }]
+            vec![Candidate::Arg {
+                alias: "br".to_string(),
+                key: "baidu".to_string()
+            }]
         );
         app.input = "br bai".to_string();
         assert_eq!(
             candidates(&app),
-            vec![Candidate::Arg { alias: "browser".to_string(), key: "baidu".to_string() }]
+            vec![Candidate::Arg {
+                alias: "br".to_string(),
+                key: "baidu".to_string()
+            }]
         );
         app.input = "br zzz".to_string();
         assert!(
-            candidates(&app).iter().all(|c| !matches!(c, Candidate::Arg { .. })),
+            candidates(&app)
+                .iter()
+                .all(|c| !matches!(c, Candidate::Arg { .. })),
             "unmatched partial falls back to the normal ranking"
         );
     }
@@ -154,6 +176,11 @@ mod tests {
         assert!(!app.quit);
         assert!(!app.summon);
         assert_eq!(app.wake, keyspec::parse(keyspec::DEFAULT_SPEC).unwrap());
+        assert_eq!(
+            app.command,
+            keyspec::parse(keyspec::DEFAULT_COMMAND_SPEC).unwrap()
+        );
+        assert_eq!(app.palette, None);
         assert_eq!(app.aliases, storage::merge_aliases(&[]));
     }
 
@@ -176,20 +203,24 @@ mod tests {
     }
 
     #[test]
-    fn empty_input_lists_history_then_aliases() {
+    fn stored_command_key_is_parsed_and_invalid_falls_back() {
+        let mut store = Store::default();
+        store.config.command_key = "ctrl+o".to_string();
+        assert_eq!(new(store, false).command, keyspec::parse("ctrl+o").unwrap());
+
+        let mut store = Store::default();
+        store.config.command_key = "garbage".to_string();
+        assert_eq!(new(store, false).command, keyspec::DEFAULT_COMMAND);
+    }
+
+    /// Empty input lists the recent history only: aliases come back as soon
+    /// as a query character is typed.
+    #[test]
+    fn empty_input_lists_recent_history_only() {
         let app = app_with_history();
         assert_eq!(
             candidates(&app),
-            vec![
-                Candidate::History { idx: 0 },
-                Candidate::History { idx: 1 },
-                Candidate::Alias {
-                    name: "browser".to_string()
-                },
-                Candidate::Alias {
-                    name: "clipboard".to_string()
-                },
-            ]
+            vec![Candidate::History { idx: 0 }, Candidate::History { idx: 1 },]
         );
     }
 
@@ -197,6 +228,29 @@ mod tests {
     fn candidates_respect_limit() {
         let app = app_with_history();
         assert!(candidates(&app).len() <= CANDIDATE_LIMIT);
+    }
+
+    /// The twist only applies to the empty bar: a typed query ranks history
+    /// and aliases together again.
+    #[test]
+    fn typed_query_brings_aliases_back() {
+        let mut app = app_with_history();
+        app.input = "br".to_string();
+        let out = candidates(&app);
+        assert!(out.contains(&Candidate::History { idx: 0 }), "{out:?}");
+        assert!(
+            out.contains(&Candidate::Alias {
+                name: "br".to_string()
+            }),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn empty_input_without_history_is_empty_despite_aliases() {
+        let app = new(Store::default(), false);
+        assert!(candidates(&app).is_empty());
+        assert_eq!(selected(&app), None);
     }
 
     #[test]

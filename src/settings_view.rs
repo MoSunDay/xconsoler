@@ -1,5 +1,6 @@
-//! Rendering for the `/settings` page: a full-screen alias table with an
-//! expandable named-args column and the wizard's bottom input line.
+//! Rendering for the `/settings` page: a full-screen alias table
+//! (`name | shortcuts | linux | macos | args`) with expandable quick-launch
+//! entry rows and the wizard's bottom input line.
 //!
 //! Text-only layout (no Table widget): each row is styled segments laid on
 //! one line, reusing the truncation/selection helpers from `crate::render`.
@@ -16,9 +17,69 @@ use crate::settings_form::{self, Form, Purpose};
 use crate::theme::{ACCENT, ERR, MUTED, OK, SELECT_BG, SUBTLE, TEXT};
 
 const TITLE_BLOCK: &str = " settings ";
-const HINTS_LIST: &str =
-    " ↑↓/jk move · Enter/→ expand · n new alias · a add arg · d delete · q/Esc back ";
-const HINTS_FORM: &str = " Enter next · Ctrl+U clear · Esc cancel ";
+/// List-screen footer hints, in display order. They are wrapped onto as many
+/// lines as the terminal width needs (see [`hint_lines`]) instead of being
+/// clipped: the deployed bar is only 52 columns wide, where a single fixed
+/// hint string hides the management keys at the end.
+const HINT_SEGMENTS: [&str; 9] = [
+    "↑↓/jk move",
+    "Enter/→ expand",
+    "← collapse",
+    "n new alias",
+    "e edit cmds",
+    "s add shortcut",
+    "a add arg",
+    "d delete",
+    "q/Esc back",
+];
+/// Separator between two hint segments (3 chars).
+const HINT_SEP: &str = " · ";
+const HINTS_FORM: &str = " Enter next/accept · Ctrl+U clear · Esc cancel ";
+
+/// Pack [`HINT_SEGMENTS`] onto lines that never exceed `width` chars.
+///
+/// Narrow-bar rationale: on the deployed 52-column terminal a single hint
+/// string is clipped, so the last keys (`s add shortcut`, `a add arg`,
+/// `d delete`, `q/Esc back`) are invisible. Wrapping instead of clipping keeps
+/// every key reachable; the footer just grows and the table shrinks.
+///
+/// Packing is greedy: segments keep their order and are joined by
+/// [`HINT_SEP`], never split mid-word. Every line gets one leading and one
+/// trailing space, so its char count stays within `width`. At least one line
+/// is always returned; a segment wider than the whole width still lands on a
+/// line of its own (the widget clips it) so nothing is dropped silently.
+fn hint_lines(width: usize) -> Vec<String> {
+    let sep_chars = HINT_SEP.chars().count();
+    let budget = width.saturating_sub(2);
+    let mut out: Vec<String> = Vec::new();
+    let mut line: Vec<&str> = Vec::new();
+    let mut used = 0usize;
+    for seg in HINT_SEGMENTS {
+        let seg_chars = seg.chars().count();
+        // width of the joined segments once `seg` is appended; the first one
+        // of a line needs no separator.
+        let needed = if line.is_empty() {
+            seg_chars
+        } else {
+            used + sep_chars + seg_chars
+        };
+        if !line.is_empty() && needed > budget {
+            out.push(format!(" {} ", line.join(HINT_SEP)));
+            line.clear();
+        }
+        // after a flush the segment opens a fresh line, so it only counts its
+        // own chars; otherwise `needed` is the joined width.
+        used = if line.is_empty() { seg_chars } else { needed };
+        line.push(seg);
+    }
+    if !line.is_empty() {
+        out.push(format!(" {} ", line.join(HINT_SEP)));
+    }
+    if out.is_empty() {
+        out.push(String::from(" "));
+    }
+    out
+}
 
 /// Human title such as `new alias (2/4)`.
 fn form_title(f: &Form) -> String {
@@ -26,6 +87,12 @@ fn form_title(f: &Form) -> String {
     match &f.purpose {
         Purpose::NewAlias => format!("new alias ({}/{})", f.step + 1, n),
         Purpose::NewArg { alias } => format!("new arg for '{alias}' ({}/{})", f.step + 1, n),
+        Purpose::NewShortcut { alias } => {
+            format!("new shortcut for '{alias}' ({}/{})", f.step + 1, n)
+        }
+        Purpose::EditCommand { alias } => {
+            format!("edit commands for '{alias}' ({}/{})", f.step + 1, n)
+        }
     }
 }
 
@@ -38,6 +105,11 @@ fn form_prompt(f: &Form) -> String {
         (Purpose::NewAlias, 3) => "macos command (empty = same as linux)".to_string(),
         (Purpose::NewArg { alias }, 0) => format!("arg key for '{alias}' (one word)"),
         (Purpose::NewArg { .. }, 1) => "arg value (spaces allowed)".to_string(),
+        (Purpose::NewShortcut { .. }, 0) => "shortcut (one word, a-z 0-9 - _)".to_string(),
+        (Purpose::EditCommand { .. }, 0) => {
+            "linux command — use {input} where the input goes".to_string()
+        }
+        (Purpose::EditCommand { .. }, 1) => "macos command (empty = same as linux)".to_string(),
         _ => "?".to_string(),
     }
 }
@@ -50,13 +122,22 @@ pub fn draw(f: &mut Frame, st: &Settings, aliases: &[AliasDef]) {
     f.render_widget(block, area);
 
     let rows = settings::rows(aliases, st.expanded);
-    let footer_h = if st.form.is_some() { 4 } else { 2 };
     let width = inner.width as usize;
+    // the list footer is one status line plus as many hint lines as the width
+    // needs, so the table area follows the real footer height.
+    let hints = hint_lines(width);
+    let footer_h = if st.form.is_some() {
+        4
+    } else {
+        1 + hints.len()
+    };
 
     let mut lines: Vec<Line> = Vec::new();
     let (name_w, sc_w) = column_widths(aliases, width);
-    let cmd_w = width.saturating_sub(name_w + sc_w + 4 + 6);
-    lines.push(header_line(name_w, sc_w));
+    // linux and macos share the leftover width (fixed overhead: 4 gaps of 2
+    // chars + the "args" header). Command text is truncated to this.
+    let cmd_w = width.saturating_sub(name_w + sc_w + 12) / 2;
+    lines.push(header_line(name_w, sc_w, cmd_w));
 
     // scroll window keeping the cursor visible
     let table_h = (inner.height as usize).saturating_sub(footer_h + 1);
@@ -72,6 +153,7 @@ pub fn draw(f: &mut Frame, st: &Settings, aliases: &[AliasDef]) {
         let selected = i == st.cursor;
         let segs = match row {
             Row::Alias { idx } => alias_segments(aliases, *idx, name_w, sc_w, cmd_w),
+            Row::Shortcut { alias, idx } => shortcut_segments(aliases, *alias, *idx, width),
             Row::Arg { alias, key } => arg_segments(aliases, *alias, key, width),
         };
         lines.push(segments_line(segs, width, selected, sel_style));
@@ -80,7 +162,12 @@ pub fn draw(f: &mut Frame, st: &Settings, aliases: &[AliasDef]) {
     match st.form.as_ref() {
         None => {
             lines.push(status_line(&st.status));
-            lines.push(Line::from(Span::styled(HINTS_LIST, Style::new().fg(MUTED))));
+            for hint in &hints {
+                lines.push(Line::from(Span::styled(
+                    hint.clone(),
+                    Style::new().fg(MUTED),
+                )));
+            }
         }
         Some(form) => {
             lines.push(Line::from(vec![
@@ -129,14 +216,18 @@ fn column_widths(aliases: &[AliasDef], width: usize) -> (usize, usize) {
     (name_w, sc_w)
 }
 
-fn header_line(name_w: usize, sc_w: usize) -> Line<'static> {
+fn header_line(name_w: usize, sc_w: usize, cmd_w: usize) -> Line<'static> {
     Line::from(Span::styled(
         format!(
-            "{:<nw$}  {:<sw$}  linux command  args",
+            "{:<nw$}  {:<sw$}  {:<lw$}  {:<mw$}  args",
             "name",
             "shortcuts",
+            "linux",
+            "macos",
             nw = name_w,
-            sw = sc_w
+            sw = sc_w,
+            lw = cmd_w,
+            mw = cmd_w
         ),
         Style::new().fg(MUTED),
     ))
@@ -157,12 +248,34 @@ fn alias_segments(
             ("  ".to_string(), Style::new()),
             (pad(&d.shortcuts.join(","), sc_w), Style::new().fg(SUBTLE)),
             ("  ".to_string(), Style::new()),
-            (truncate(d.linux.as_deref().unwrap_or("—"), cmd_w), Style::new().fg(SUBTLE)),
+            (
+                // truncate then pad: both command columns stay aligned even
+                // when one command is much shorter than the other.
+                pad(&truncate(d.linux.as_deref().unwrap_or("—"), cmd_w), cmd_w),
+                Style::new().fg(SUBTLE),
+            ),
+            ("  ".to_string(), Style::new()),
+            (
+                // truncate then pad: both command columns stay aligned even
+                // when one command is much shorter than the other.
+                pad(&truncate(d.macos.as_deref().unwrap_or("—"), cmd_w), cmd_w),
+                Style::new().fg(SUBTLE),
+            ),
             ("  ".to_string(), Style::new()),
             (d.args.len().to_string(), Style::new().fg(MUTED)),
         ],
         None => vec![("…".to_string(), Style::new().fg(MUTED))],
     }
+}
+
+/// Indented shortcut row under the expanded alias: `↳ shortcut: gc`.
+fn shortcut_segments(aliases: &[AliasDef], alias: usize, idx: usize, width: usize) -> Segs {
+    let shortcut = aliases
+        .get(alias)
+        .and_then(|d| d.shortcuts.get(idx).cloned())
+        .unwrap_or_else(|| "…".to_string());
+    let text = format!("  ↳ shortcut: {shortcut}");
+    vec![(truncate(&text, width), Style::new().fg(ACCENT))]
 }
 
 /// Indented `key → value` row under the expanded alias.
@@ -228,13 +341,26 @@ mod tests {
         frame_text(&terminal)
     }
 
+    /// Same page on the real window width (xterm geometry is 140x14), where
+    /// the whole footer hint line fits.
+    fn draw_wide(st: &Settings, aliases: &[AliasDef]) -> String {
+        draw_at(140, 14, st, aliases)
+    }
+
+    /// The page at an arbitrary terminal size (the deployed bar is 52 wide).
+    fn draw_at(w: u16, h: u16, st: &Settings, aliases: &[AliasDef]) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| draw(f, st, aliases)).unwrap();
+        frame_text(&terminal)
+    }
+
     fn t_store() -> (Store, Vec<AliasDef>) {
         let mut store = Store::default();
         store.aliases.push(AliasDef {
             name: "t".to_string(),
             shortcuts: vec!["tt".to_string()],
             linux: Some("printf %s {input}".to_string()),
-            macos: None,
+            macos: Some("printf %s {input}".to_string()),
             args: [("baidu".to_string(), "https://www.baidu.com".to_string())]
                 .into_iter()
                 .collect(),
@@ -245,15 +371,192 @@ mod tests {
     }
 
     #[test]
+    fn command_columns_line_up_with_the_header() {
+        let mut store = Store::default();
+        store.aliases.push(AliasDef {
+            name: "f".to_string(),
+            shortcuts: vec![],
+            linux: Some("ls".to_string()),
+            macos: Some("open -a Finder".to_string()),
+            args: Default::default(),
+            builtin: false,
+        });
+        let aliases = settings::view(&store);
+        let text = draw_wide(&settings::new(), &aliases);
+        let lines: Vec<&str> = text.lines().collect();
+        let header = lines.iter().find(|l| l.contains("macos")).expect("header");
+        let col = header.find("macos").expect("macos column");
+        let row = lines
+            .iter()
+            .find(|l| l.contains("open -a Finder"))
+            .expect("alias row");
+        assert_eq!(
+            row.find("open -a Finder").unwrap(),
+            col,
+            "a short linux command must not shift the macos column"
+        );
+    }
+
+    #[test]
     fn list_shows_table_and_hints() {
         let (_store, aliases) = t_store();
         let text = draw_once(&settings::new(), &aliases);
         assert!(text.contains("settings"));
-        assert!(text.contains("browser"));
-        assert!(text.contains("clipboard"));
+        assert!(text.contains("br"));
+        assert!(text.contains("cd"));
         assert!(text.contains("printf %s {input}"));
         assert!(text.contains("n new alias"));
-        assert!(text.contains("q/Esc back"));
+        assert!(text.contains("e edit cmds"));
+    }
+
+    #[test]
+    fn footer_lists_every_key_including_the_new_ones() {
+        let (_store, aliases) = t_store();
+        let text = draw_wide(&settings::new(), &aliases);
+        for hint in [
+            "↑↓/jk move",
+            "Enter/→ expand",
+            "← collapse",
+            "n new alias",
+            "e edit cmds",
+            "s add shortcut",
+            "a add arg",
+            "d delete",
+            "q/Esc back",
+        ] {
+            assert!(text.contains(hint), "footer is missing {hint}");
+        }
+    }
+
+    #[test]
+    fn hints_wrap_instead_of_clipping_on_a_narrow_bar() {
+        let (_store, aliases) = t_store();
+        // the deployed bar: 52 columns, where one hint line cannot hold all
+        // nine segments and the old fixed string lost the last four.
+        let text = draw_at(52, 16, &settings::new(), &aliases);
+        for seg in HINT_SEGMENTS {
+            assert!(text.contains(seg), "the 52-column bar clips {seg}");
+        }
+        for line in text.lines() {
+            assert!(
+                line.chars().count() <= 52,
+                "a rendered line overflows the bar: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn hints_stay_on_one_line_when_wide() {
+        let (_store, aliases) = t_store();
+        let text = draw_wide(&settings::new(), &aliases);
+        let line = text
+            .lines()
+            .find(|l| l.contains("q/Esc back"))
+            .expect("hint line");
+        for seg in HINT_SEGMENTS {
+            assert!(
+                line.contains(seg),
+                "140 columns must keep {seg} on one line"
+            );
+        }
+    }
+
+    #[test]
+    fn hint_lines_pack_segments_to_the_width() {
+        // narrow bar: three lines; the real window: a single line
+        assert_eq!(hint_lines(52).len(), 3);
+        assert_eq!(hint_lines(140).len(), 1);
+        // degenerate widths still yield lines and never panic
+        assert!(!hint_lines(0).is_empty());
+        assert!(!hint_lines(1).is_empty());
+        for width in [0usize, 1, 16, 50, 52, 78, 138, 300] {
+            let lines = hint_lines(width);
+            let joined = lines.join("");
+            for seg in HINT_SEGMENTS {
+                assert!(joined.contains(seg), "width {width} drops {seg}");
+                // no segment is ever split mid-word across two lines
+                assert!(
+                    lines.iter().any(|l| l.contains(seg)),
+                    "width {width} splits {seg}"
+                );
+            }
+            if width >= 16 {
+                // 16 is the widest single segment plus its two padding spaces,
+                // so every line fits; below that the widget has to clip.
+                for line in &lines {
+                    assert!(
+                        line.chars().count() <= width,
+                        "width {width} renders an over-wide line: {line}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn table_shows_the_macos_column() {
+        let (_store, aliases) = t_store();
+        let text = draw_wide(&settings::new(), &aliases);
+        assert!(text.contains("name"));
+        assert!(text.contains("shortcuts"));
+        assert!(text.contains("linux"));
+        assert!(text.contains("macos"));
+        assert!(text.contains("args"));
+        // t has an explicit macos command, shown next to its linux one
+        // t's row carries the same command in both command columns
+        let row = text
+            .lines()
+            .find(|l| l.contains("printf %s {input}"))
+            .expect("t row");
+        assert_eq!(row.matches("printf %s {input}").count(), 2, "got: {row}");
+    }
+
+    #[test]
+    fn missing_macos_command_renders_a_dash() {
+        let mut store = Store::default();
+        store.aliases.push(AliasDef {
+            name: "t".to_string(),
+            shortcuts: vec![],
+            linux: Some("printf %s {input}".to_string()),
+            macos: None,
+            args: Default::default(),
+            builtin: false,
+        });
+        let aliases = settings::view(&store);
+        let text = draw_wide(&settings::new(), &aliases);
+        let row = text
+            .lines()
+            .find(|l| l.contains("printf %s {input}"))
+            .expect("t row");
+        assert!(row.contains('—'), "no macos command shows a dash: {row}");
+    }
+
+    #[test]
+    fn long_commands_are_truncated_to_keep_the_table_readable() {
+        let long = "x".repeat(60);
+        let mut store = Store::default();
+        store.aliases.push(AliasDef {
+            name: "t".to_string(),
+            shortcuts: vec![],
+            linux: Some(long.clone()),
+            macos: Some(long.clone()),
+            args: Default::default(),
+            builtin: false,
+        });
+        let aliases = settings::view(&store);
+        let text = draw_wide(&settings::new(), &aliases);
+        assert!(!text.contains(&long), "the raw command is not drawn");
+        assert!(text.contains('…'), "truncation is visible");
+    }
+
+    #[test]
+    fn expanded_alias_lists_shortcut_rows() {
+        let (_store, aliases) = t_store();
+        let mut st = settings::new();
+        st.cursor = 2;
+        st.expanded = Some(2);
+        let text = draw_once(&st, &aliases);
+        assert!(text.contains("↳ shortcut: tt"));
     }
 
     #[test]
@@ -279,6 +582,29 @@ mod tests {
         assert!(text.contains("{input}"));
         assert!(text.contains("❯ printf"));
         assert!(text.contains("Esc cancel"));
+    }
+
+    #[test]
+    fn edit_command_form_shows_the_prefill_and_title() {
+        let (_store, aliases) = t_store();
+        let mut st = settings::new();
+        let form = settings_form::new_edit_command("t", Some("printf %s {input}"), Some("open"));
+        st.form = Some(form);
+        let text = draw_wide(&st, &aliases);
+        assert!(text.contains("edit commands for 't' (1/2)"));
+        assert!(text.contains("linux command"));
+        assert!(text.contains("❯ printf %s {input}"), "step 1 is prefilled");
+        assert!(text.contains("Enter next/accept"));
+    }
+
+    #[test]
+    fn shortcut_form_shows_the_one_step_title() {
+        let (_store, aliases) = t_store();
+        let mut st = settings::new();
+        st.form = Some(settings_form::new_shortcut("t"));
+        let text = draw_wide(&st, &aliases);
+        assert!(text.contains("new shortcut for 't' (1/1)"));
+        assert!(text.contains("shortcut (one word"));
     }
 
     #[test]

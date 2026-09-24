@@ -3,8 +3,10 @@
 //!
 //! Everything here is a pure transition:
 //! `handle_key(state, store, key) -> (new state, new store, effect)` — no
-//! I/O, no clocks. Persistence stays with the caller (`app::apply_settings`
-//! runs `storage::save` when the effect says [`Effect::Save`]).
+//! I/O, no clocks. Persistence stays with the caller
+//! ([`crate::settings_apply::apply`] runs `storage::save` when the effect says
+//! [`Effect::Save`] and pushes data-carrying effects through the
+//! `alias::` helpers).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -13,7 +15,7 @@ use crate::settings_form::{self, Form, FormOutcome, Submission};
 use crate::storage::{self, Store};
 
 /// What the caller should do after a key transition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// Nothing changed.
     None,
@@ -23,17 +25,46 @@ pub enum Effect {
     Save,
     /// Quit the app.
     Quit,
+    /// Insert or replace a user alias definition.
+    AddAlias(AliasDef),
+    /// Set a named argument (`alias::set_arg`).
+    SetArg {
+        alias: String,
+        key: String,
+        value: String,
+    },
+    /// Add a quick-launch shortcut (`alias::add_shortcut`).
+    AddShortcut { alias: String, shortcut: String },
+    /// Drop a quick-launch shortcut (`alias::remove_shortcut`).
+    RemoveShortcut { alias: String, shortcut: String },
+    /// Rewrite both commands of an alias (`alias::set_commands`).
+    SetCommands {
+        alias: String,
+        linux: String,
+        macos: String,
+    },
 }
 
 /// One flattened, selectable row of the list screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
-    Alias { idx: usize },
-    Arg { alias: usize, key: String },
+    Alias {
+        idx: usize,
+    },
+    /// Quick-launch entry of an expanded alias; `idx` indexes its shortcuts.
+    Shortcut {
+        alias: usize,
+        idx: usize,
+    },
+    Arg {
+        alias: usize,
+        key: String,
+    },
 }
 
 /// Settings page state. `cursor` indexes [`rows`]; `expanded` is the alias
-/// whose named args are shown indented below it.
+/// whose quick-launch entries (shortcuts, then named args) are shown
+/// indented below it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     /// Active wizard form; `None` means the list screen.
@@ -59,12 +90,16 @@ pub fn view(store: &Store) -> Vec<AliasDef> {
     storage::merge_aliases(&store.aliases)
 }
 
-/// Flattened rows: one per alias, plus indented arg rows for `expanded`.
+/// Flattened rows: one per alias, plus indented quick-launch rows
+/// (shortcuts first, then named args) for `expanded`.
 pub fn rows(aliases: &[AliasDef], expanded: Option<usize>) -> Vec<Row> {
     let mut out = Vec::new();
     for (idx, def) in aliases.iter().enumerate() {
         out.push(Row::Alias { idx });
         if expanded == Some(idx) {
+            for (i, _) in def.shortcuts.iter().enumerate() {
+                out.push(Row::Shortcut { alias: idx, idx: i });
+            }
             for key in def.args.keys() {
                 out.push(Row::Arg {
                     alias: idx,
@@ -79,6 +114,12 @@ pub fn rows(aliases: &[AliasDef], expanded: Option<usize>) -> Vec<Row> {
 /// One key transition over the whole page (list or form).
 pub fn handle_key(st: &Settings, store: &Store, key: KeyEvent) -> (Settings, Store, Effect) {
     if key.kind != KeyEventKind::Press {
+        return (st.clone(), store.clone(), Effect::None);
+    }
+    // ALT belongs to the launcher: the wake hotkey keeps working on this
+    // page, and without this guard its plain-char arms (Alt+D => delete)
+    // would fire instead.
+    if key.modifiers.contains(KeyModifiers::ALT) {
         return (st.clone(), store.clone(), Effect::None);
     }
     match st.form.as_ref() {
@@ -102,18 +143,30 @@ fn list_key(st: &Settings, store: &Store, key: KeyEvent) -> (Settings, Store, Ef
 
     match key.code {
         KeyCode::Char('c') if ctrl => effect = Effect::Quit,
-        KeyCode::Esc | KeyCode::Char('q') => effect = Effect::Back,
-        KeyCode::Up | KeyCode::Char('k') => next.cursor = move_sel(&cur_rows, st.cursor, -1),
-        KeyCode::Down | KeyCode::Char('j') => next.cursor = move_sel(&cur_rows, st.cursor, 1),
+        KeyCode::Esc => effect = Effect::Back,
+        KeyCode::Char('q') if !ctrl => effect = Effect::Back,
+        KeyCode::Up => next.cursor = move_sel(&cur_rows, st.cursor, -1),
+        KeyCode::Down => next.cursor = move_sel(&cur_rows, st.cursor, 1),
+        KeyCode::Char('k') if !ctrl => next.cursor = move_sel(&cur_rows, st.cursor, -1),
+        KeyCode::Char('j') if !ctrl => next.cursor = move_sel(&cur_rows, st.cursor, 1),
         KeyCode::Enter | KeyCode::Right => next.expanded = toggle(&cur_rows, st),
         // ← is a pure collapse: it never opens a different alias by accident.
         KeyCode::Left => next.expanded = None,
-        KeyCode::Char('n') => next.form = Some(settings_form::new_alias()),
-        KeyCode::Char('a') => {
+        KeyCode::Char('n') if !ctrl => next.form = Some(settings_form::new_alias()),
+        KeyCode::Char('s') if !ctrl => {
             next.form = selected_alias(&cur_rows, st, &aliases)
-                .map(|name| settings_form::new_arg(&name))
+                .map(|name| settings_form::new_shortcut(&name))
         }
-        KeyCode::Char('d') => {
+        KeyCode::Char('a') if !ctrl => {
+            next.form =
+                selected_alias(&cur_rows, st, &aliases).map(|name| settings_form::new_arg(&name))
+        }
+        KeyCode::Char('e') if !ctrl => {
+            next.form = selected_def(&cur_rows, st, &aliases).map(|d| {
+                settings_form::new_edit_command(&d.name, d.linux.as_deref(), d.macos.as_deref())
+            })
+        }
+        KeyCode::Char('d') if !ctrl => {
             effect = delete_row(&cur_rows, st, &mut store, &mut next);
         }
         _ => {}
@@ -137,14 +190,20 @@ fn toggle(rows: &[Row], st: &Settings) -> Option<usize> {
     }
 }
 
-/// Name of the alias the selection belongs to (an arg row's parent).
+/// Name of the alias the selection belongs to (an entry row's parent).
 fn selected_alias(rows: &[Row], st: &Settings, aliases: &[AliasDef]) -> Option<String> {
+    selected_def(rows, st, aliases).map(|d| d.name.clone())
+}
+
+/// Definition the selection belongs to (an entry row's parent alias).
+fn selected_def<'a>(rows: &[Row], st: &Settings, aliases: &'a [AliasDef]) -> Option<&'a AliasDef> {
     let idx = match rows.get(st.cursor) {
         Some(Row::Alias { idx }) => *idx,
+        Some(Row::Shortcut { alias, .. }) => *alias,
         Some(Row::Arg { alias, .. }) => *alias,
         None => return None,
     };
-    aliases.get(idx).map(|d| d.name.clone())
+    aliases.get(idx)
 }
 
 /// Move by `delta`, clamped into `rows`.
@@ -156,18 +215,36 @@ fn move_sel(rows: &[Row], cur: usize, delta: i32) -> usize {
     (cur + delta).clamp(0, rows.len() as i32 - 1) as usize
 }
 
-/// `d`: delete the selection — an arg row loses just that argument, an
+/// `d`: delete the selection — a shortcut row drops just that shortcut, an
+/// arg row just that argument (both reported through the effect path), an
 /// alias row loses the whole alias (built-ins refuse, like `:del`).
-fn delete_row(
-    rows: &[Row],
-    st: &Settings,
-    store: &mut Store,
-    next: &mut Settings,
-) -> Effect {
+fn delete_row(rows: &[Row], st: &Settings, store: &mut Store, next: &mut Settings) -> Effect {
     let aliases = view(store);
     match rows.get(st.cursor) {
+        Some(Row::Shortcut { alias, idx }) => match aliases.get(*alias) {
+            Some(def) => match def.shortcuts.get(*idx) {
+                // The removal itself runs in the effect path (which reports
+                // the outcome); the alias stays expanded so more entries can
+                // be dropped in a row.
+                Some(shortcut) => Effect::RemoveShortcut {
+                    alias: def.name.clone(),
+                    shortcut: shortcut.clone(),
+                },
+                None => {
+                    next.status = Some((false, "nothing selected".to_string()));
+                    Effect::None
+                }
+            },
+            None => {
+                next.status = Some((false, "nothing selected".to_string()));
+                Effect::None
+            }
+        },
         Some(Row::Arg { alias, key }) => {
-            let name = aliases.get(*alias).map(|d| d.name.clone()).unwrap_or_default();
+            let name = aliases
+                .get(*alias)
+                .map(|d| d.name.clone())
+                .unwrap_or_default();
             match alias::remove_arg(&mut store.aliases, &name, key) {
                 Ok(()) => {
                     next.status = Some((true, format!("arg removed: {key}")));
@@ -206,12 +283,7 @@ fn delete_row(
     }
 }
 
-fn form_key(
-    st: &Settings,
-    form: &Form,
-    store: &Store,
-    key: KeyEvent,
-) -> (Settings, Store, Effect) {
+fn form_key(st: &Settings, form: &Form, store: &Store, key: KeyEvent) -> (Settings, Store, Effect) {
     let (next_form, outcome) = settings_form::handle_key(form, store, key);
     let list = |form: Option<Form>, status: Option<(bool, String)>| Settings {
         form,
@@ -220,42 +292,43 @@ fn form_key(
         status,
     };
     match outcome {
-        FormOutcome::Active => (list(Some(next_form), st.status.clone()), store.clone(), Effect::None),
-        FormOutcome::Quit => (list(Some(next_form), st.status.clone()), store.clone(), Effect::Quit),
+        FormOutcome::Active => (
+            list(Some(next_form), st.status.clone()),
+            store.clone(),
+            Effect::None,
+        ),
+        FormOutcome::Quit => (
+            list(Some(next_form), st.status.clone()),
+            store.clone(),
+            Effect::Quit,
+        ),
         FormOutcome::Cancel => (list(None, None), store.clone(), Effect::None),
-        FormOutcome::Submit(sub) => {
-            let mut store = store.clone();
-            match apply_submission(&mut store, sub) {
-                Ok(msg) => (list(None, Some((true, msg))), store, Effect::Save),
-                Err(e) => {
-                    let mut f = next_form;
-                    f.error = Some(e);
-                    (list(Some(f), st.status.clone()), store, Effect::None)
-                }
-            }
-        }
+        FormOutcome::Submit(sub) => (
+            // Every wizard result travels as a data-carrying effect: the
+            // caller applies it through the shared `alias::` helpers, saves,
+            // and reports the outcome on the list's status line.
+            list(None, None),
+            store.clone(),
+            effect_of(sub),
+        ),
     }
 }
 
-/// Apply a finished wizard submission to the store. Ok carries the status
-/// message for the list screen.
-fn apply_submission(store: &mut Store, sub: Submission) -> Result<String, String> {
+/// Effect carrying a finished wizard submission.
+fn effect_of(sub: Submission) -> Effect {
     match sub {
-        Submission::Alias(def) => {
-            let label = alias::label(&def);
-            match store.aliases.iter().position(|d| d.name == def.name) {
-                Some(i) => store.aliases[i] = def,
-                None => store.aliases.push(def),
-            }
-            Ok(format!("alias added: {label}"))
-        }
-        Submission::Arg { alias, key, value } => {
-            match alias::set_arg(&mut store.aliases, &alias, &key, &value) {
-                Ok(Some(_)) => Ok(format!("arg set: {alias}.{key} (replaced previous value)")),
-                Ok(None) => Ok(format!("arg set: {alias}.{key} = {value}")),
-                Err(e) => Err(e),
-            }
-        }
+        Submission::Alias(def) => Effect::AddAlias(def),
+        Submission::Arg { alias, key, value } => Effect::SetArg { alias, key, value },
+        Submission::Shortcut { alias, shortcut } => Effect::AddShortcut { alias, shortcut },
+        Submission::Commands {
+            alias,
+            linux,
+            macos,
+        } => Effect::SetCommands {
+            alias,
+            linux,
+            macos,
+        },
     }
 }
 
@@ -263,6 +336,12 @@ fn apply_submission(store: &mut Store, sub: Submission) -> Result<String, String
 fn clamp_cursor(st: &mut Settings, aliases: &[AliasDef]) {
     let len = rows(aliases, st.expanded).len();
     st.cursor = st.cursor.min(len.saturating_sub(1));
+}
+
+/// Re-clamp the cursor after the store changed outside this module: the
+/// effect path applies shortcut/command edits between two key transitions.
+pub fn reclamp(st: &mut Settings, store: &Store) {
+    clamp_cursor(st, &view(store));
 }
 
 #[cfg(test)]
@@ -280,18 +359,37 @@ mod tests {
             shortcuts: vec!["tt".to_string()],
             linux: Some("printf %s {input}".to_string()),
             macos: None,
-            args: [("baidu".to_string(), "https://www.baidu.com".to_string())].into_iter().collect(),
+            args: [("baidu".to_string(), "https://www.baidu.com".to_string())]
+                .into_iter()
+                .collect(),
             builtin: false,
         });
         store
     }
 
+    fn type_str(st: &Settings, store: &Store, s: &str) -> Settings {
+        let mut st = st.clone();
+        for c in s.chars() {
+            let (next, _, _) = handle_key(&st, store, key(KeyCode::Char(c)));
+            st = next;
+        }
+        st
+    }
+
+    /// Select alias `t` (index 2 of the merged list) with `t`'s 1 shortcut +
+    /// 1 arg shown.
+    fn on_t() -> (Settings, Store) {
+        let store = store_with_t();
+        let st = Settings { cursor: 2, ..new() };
+        (st, store)
+    }
+
     #[test]
-    fn rows_list_aliases_then_expanded_args() {
+    fn rows_list_aliases_then_expanded_entries() {
         let store = store_with_t();
         let aliases = view(&store);
         let flat = rows(&aliases, None);
-        assert_eq!(flat.len(), 3); // browser, clipboard, t
+        assert_eq!(flat.len(), 3); // br, cd, t
         let expanded = rows(&aliases, Some(2));
         assert_eq!(
             expanded,
@@ -299,9 +397,157 @@ mod tests {
                 Row::Alias { idx: 0 },
                 Row::Alias { idx: 1 },
                 Row::Alias { idx: 2 },
-                Row::Arg { alias: 2, key: "baidu".to_string() },
+                // quick-launch entries: shortcuts first, then named args
+                Row::Shortcut { alias: 2, idx: 0 },
+                Row::Arg {
+                    alias: 2,
+                    key: "baidu".to_string()
+                },
             ]
         );
+    }
+
+    #[test]
+    fn shortcut_rows_follow_every_shortcut_of_the_expanded_alias() {
+        let mut store = store_with_t();
+        store.aliases[0].shortcuts = vec!["tt".to_string(), "tw".to_string()];
+        let aliases = view(&store);
+        let flat = rows(&aliases, Some(2));
+        assert_eq!(
+            flat[3..5],
+            [
+                Row::Shortcut { alias: 2, idx: 0 },
+                Row::Shortcut { alias: 2, idx: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn s_opens_the_shortcut_wizard_for_the_selected_alias() {
+        let (st, store) = on_t();
+        let (st, _, eff) = handle_key(&st, &store, key(KeyCode::Char('s')));
+        assert_eq!(eff, Effect::None);
+        let form = st.form.as_ref().expect("shortcut wizard open");
+        assert_eq!(
+            form.purpose,
+            settings_form::Purpose::NewShortcut {
+                alias: "t".to_string()
+            }
+        );
+        assert_eq!(settings_form::step_count(form), 1);
+        // Esc cancels, nothing was touched
+        let (st, _, eff) = handle_key(&st, &store, key(KeyCode::Esc));
+        assert_eq!((st.form, eff), (None, Effect::None));
+    }
+
+    #[test]
+    fn submitting_the_shortcut_wizard_yields_the_effect() {
+        let (st, store) = on_t();
+        let (st, _, _) = handle_key(&st, &store, key(KeyCode::Char('s')));
+        let st = type_str(&st, &store, "gc");
+        let (st, _, eff) = handle_key(&st, &store, key(KeyCode::Enter));
+        assert_eq!(st.form, None, "the wizard closes on submit");
+        assert_eq!(
+            eff,
+            Effect::AddShortcut {
+                alias: "t".to_string(),
+                shortcut: "gc".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn e_opens_the_edit_wizard_prefilled_with_both_commands() {
+        let (st, store) = on_t();
+        let (st, _, eff) = handle_key(&st, &store, key(KeyCode::Char('e')));
+        assert_eq!(eff, Effect::None);
+        let form = st.form.expect("edit wizard open");
+        assert_eq!(
+            form.purpose,
+            settings_form::Purpose::EditCommand {
+                alias: "t".to_string()
+            }
+        );
+        assert_eq!(form.input, "printf %s {input}", "linux step prefilled");
+        assert_eq!(form.macos, "", "t has no macos command");
+        assert_eq!(settings_form::step_count(&form), 2);
+    }
+
+    #[test]
+    fn edit_wizard_accepts_prefilled_text_and_mirrors_blank_macos() {
+        let (st, store) = on_t();
+        let (st, _, _) = handle_key(&st, &store, key(KeyCode::Char('e')));
+        // Enter accepts the prefilled linux step, Enter the (empty) macos one
+        let (st, _, _) = handle_key(&st, &store, key(KeyCode::Enter));
+        let (st, _, eff) = handle_key(&st, &store, key(KeyCode::Enter));
+        assert_eq!(st.form, None);
+        assert_eq!(
+            eff,
+            Effect::SetCommands {
+                alias: "t".to_string(),
+                linux: "printf %s {input}".to_string(),
+                macos: String::new(),
+            },
+            "a blank macos answer mirrors linux in alias::set_commands"
+        );
+    }
+
+    #[test]
+    fn entry_rows_route_e_and_s_to_their_parent_alias() {
+        let (st, store) = on_t();
+        let (st, _, _) = handle_key(&st, &store, key(KeyCode::Enter)); // expand
+        let (st, _, _) = handle_key(&st, &store, key(KeyCode::Down)); // shortcut row
+        let (st, _, _) = handle_key(&st, &store, key(KeyCode::Down)); // arg row
+        let (st, _, _) = handle_key(&st, &store, key(KeyCode::Char('s')));
+        assert_eq!(
+            st.form.as_ref().map(|f| f.purpose.clone()),
+            Some(settings_form::Purpose::NewShortcut {
+                alias: "t".to_string()
+            })
+        );
+        let (st, _, _) = handle_key(&st, &store, key(KeyCode::Esc));
+        let (st, _, _) = handle_key(&st, &store, key(KeyCode::Char('e')));
+        assert_eq!(
+            st.form.as_ref().map(|f| f.purpose.clone()),
+            Some(settings_form::Purpose::EditCommand {
+                alias: "t".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn d_on_a_shortcut_row_asks_for_its_removal() {
+        let (st, store) = on_t();
+        let (st, _, eff) = handle_key(&st, &store, key(KeyCode::Enter)); // expand
+        assert_eq!(eff, Effect::None);
+        let (st, _, _) = handle_key(&st, &store, key(KeyCode::Down)); // shortcut row
+        let (_, s2, eff) = handle_key(&st, &store, key(KeyCode::Char('d')));
+        assert_eq!(
+            eff,
+            Effect::RemoveShortcut {
+                alias: "t".to_string(),
+                shortcut: "tt".to_string()
+            },
+            "`d` on an entry row drops just that entry"
+        );
+        assert_eq!(s2, store, "the pure transition leaves the store alone");
+        assert_eq!(s2.aliases[0].shortcuts, vec!["tt".to_string()]);
+    }
+
+    #[test]
+    fn reclamp_keeps_the_cursor_on_a_row() {
+        let store = store_with_t();
+        let mut st = Settings {
+            cursor: 4,
+            expanded: Some(2),
+            ..new()
+        };
+        reclamp(&mut st, &store);
+        assert_eq!(st.cursor, 4, "rows: 3 aliases + 1 shortcut + 1 arg");
+        let mut empty = new();
+        empty.cursor = 7;
+        reclamp(&mut empty, &Store::default());
+        assert_eq!(empty.cursor, 1, "clamped to the last of 2 built-ins");
     }
 
     #[test]
@@ -334,12 +580,63 @@ mod tests {
     #[test]
     fn q_and_esc_back_ctrl_c_quits() {
         let store = store_with_t();
-        assert_eq!(handle_key(&new(), &store, key(KeyCode::Esc)).2, Effect::Back);
-        assert_eq!(handle_key(&new(), &store, key(KeyCode::Char('q'))).2, Effect::Back);
         assert_eq!(
-            handle_key(&new(), &store, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)).2,
+            handle_key(&new(), &store, key(KeyCode::Esc)).2,
+            Effect::Back
+        );
+        assert_eq!(
+            handle_key(&new(), &store, key(KeyCode::Char('q'))).2,
+            Effect::Back
+        );
+        assert_eq!(
+            handle_key(
+                &new(),
+                &store,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            )
+            .2,
             Effect::Quit
         );
+    }
+
+    /// Alt+D (the default wake key) and the other modified chars must not
+    /// reach the plain-char arms: only Ctrl+C is a ctrl shortcut here.
+    #[test]
+    fn modified_char_keys_do_not_fire_list_actions() {
+        let (st, store) = on_t();
+        let alt_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT);
+        assert_eq!(
+            handle_key(&st, &store, alt_d),
+            (st.clone(), store.clone(), Effect::None),
+            "Alt+D must not delete the selection"
+        );
+        let alt_k = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT);
+        assert_eq!(
+            handle_key(&st, &store, alt_k),
+            (st.clone(), store.clone(), Effect::None),
+            "Alt+K must not move the selection"
+        );
+
+        for c in ['d', 'k', 'j', 'q', 'n', 's', 'a', 'e'] {
+            let ctrl = KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+            assert_eq!(
+                handle_key(&st, &store, ctrl),
+                (st.clone(), store.clone(), Effect::None),
+                "Ctrl+{c} must not fire the list actions"
+            );
+        }
+        assert_eq!(store.aliases.len(), 1, "the user alias survives");
+    }
+
+    #[test]
+    fn ctrl_c_still_quits_from_the_list() {
+        let (st, store) = on_t();
+        let (_, _, eff) = handle_key(
+            &st,
+            &store,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(eff, Effect::Quit);
     }
 
     #[test]
