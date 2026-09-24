@@ -75,7 +75,10 @@ fn main() {
         run_print_bind(&cli);
     }
 
-    if !std::io::stdin().is_tty() {
+    // zle widgets (zsh) run external commands with stdin redirected from
+    // /dev/null: accept that as long as a controlling terminal exists --
+    // crossterm falls back to /dev/tty itself when stdin is not a tty.
+    if !std::io::stdin().is_tty() && std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").is_err() {
         eprintln!("xconsoler: stdin is not a terminal; run me in an interactive shell");
         std::process::exit(2);
     }
