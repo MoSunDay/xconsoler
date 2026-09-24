@@ -3,10 +3,14 @@
 //! Command template conventions:
 //!
 //! * `{input}` - placeholder for the user's input; it is shell-quoted
-//!   (see [`crate::exec::shell_quote`]) before being substituted.
+//!   (see [`crate::exec::shell_quote`]) before being substituted. Named
+//!   arguments (see `args`) are resolved into the input first
+//!   (see [`crate::exec::resolve_args`]).
 //! * `@stdin` - marker meaning the input is delivered through the child
 //!   process stdin; the marker is removed from the command string before
 //!   execution (see [`crate::exec::run_alias`]).
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +21,11 @@ pub struct AliasDef {
     pub shortcuts: Vec<String>,
     pub linux: Option<String>,
     pub macos: Option<String>,
+    /// Named arguments: typing `<alias> <key> <more…>` replaces `<key>` with
+    /// the mapped value before the command runs. `#[serde(default)]` keeps
+    /// stores written before this field existed loadable.
+    #[serde(default)]
+    pub args: BTreeMap<String, String>,
     pub builtin: bool,
 }
 
@@ -28,16 +37,16 @@ pub fn defaults() -> Vec<AliasDef> {
             shortcuts: vec!["br".to_string()],
             linux: Some("xdg-open {input} >/dev/null 2>&1".to_string()),
             macos: Some("open {input}".to_string()),
+            args: BTreeMap::new(),
             builtin: true,
         },
         AliasDef {
             name: "clipboard".to_string(),
             shortcuts: vec!["cd".to_string()],
-            linux: Some(
-                "wl-copy @stdin || xclip -selection clipboard @stdin || xsel --clipboard --input"
-                    .to_string(),
-            ),
-            macos: Some("pbcopy @stdin".to_string()),
+            // Native backend: no xclip/wl-copy/xsel/pbcopy dependency.
+            linux: Some(crate::clipboard::TEMPLATE.to_string()),
+            macos: Some(crate::clipboard::TEMPLATE.to_string()),
+            args: BTreeMap::new(),
             builtin: true,
         },
     ]
@@ -73,6 +82,17 @@ pub fn entry_label(def: &AliasDef) -> &str {
 pub enum AliasOp {
     Add(AliasDef),
     Remove(String),
+    /// `:arg name key value...` — set (or replace) a named argument.
+    SetArg {
+        name: String,
+        key: String,
+        value: String,
+    },
+    /// `:unarg name key` — remove a named argument.
+    DelArg {
+        name: String,
+        key: String,
+    },
 }
 
 /// Parse a colon command. The leading `:` has already been stripped by the
@@ -84,10 +104,13 @@ pub enum AliasOp {
 /// ```text
 /// add <name>[,<shortcut>...] <linux-cmd> [// <macos-cmd>]
 /// del <name>
+/// arg <name> <key> <value...>
+/// unarg <name> <key>
 /// ```
 ///
 /// A command of `-` means "not configured on this platform". The command
-/// strings keep their original spacing (only re-joined by whitespace tokens).
+/// strings keep their original spacing (only re-joined by whitespace tokens);
+/// `arg` values keep theirs too — the value is the raw remainder of the line.
 pub fn parse_colon_cmd(line: &str) -> Result<Option<AliasOp>, String> {
     let line = line.trim();
     if line.is_empty() {
@@ -97,6 +120,9 @@ pub fn parse_colon_cmd(line: &str) -> Result<Option<AliasOp>, String> {
     match tokens[0].to_lowercase().as_str() {
         "add" => parse_add(&tokens[1..]),
         "del" => parse_del(&tokens[1..]),
+        // `arg` with no arguments must not slice past the line end.
+        "arg" => parse_arg(line.get(1 + tokens[0].len()..).unwrap_or("")),
+        "unarg" => parse_unarg(&tokens[1..]),
         _ => Ok(None), // "help" and anything unknown: caller shows help
     }
 }
@@ -128,6 +154,7 @@ fn parse_add(rest: &[&str]) -> Result<Option<AliasOp>, String> {
         shortcuts,
         linux,
         macos,
+        args: BTreeMap::new(),
         builtin: false,
     })))
 }
@@ -137,6 +164,55 @@ fn parse_del(rest: &[&str]) -> Result<Option<AliasOp>, String> {
         return Err("usage: del <name>".to_string());
     }
     Ok(Some(AliasOp::Remove(rest[0].to_string())))
+}
+
+/// `arg <name> <key> <value...>`: the value is the raw remainder of the
+/// line after the key token, so it may contain (and keep) spaces.
+fn parse_arg(rest: &str) -> Result<Option<AliasOp>, String> {
+    let toks = indexed_tokens(rest);
+    if toks.len() < 3 {
+        return Err("usage: arg <name> <key> <value...>".to_string());
+    }
+    let (_, name) = toks[0];
+    let (_, key) = toks[1];
+    let (value_at, _) = toks[2];
+    let value = rest[value_at..].trim();
+    Ok(Some(AliasOp::SetArg {
+        name: name.to_string(),
+        key: key.to_string(),
+        value: value.to_string(),
+    }))
+}
+
+fn parse_unarg(rest: &[&str]) -> Result<Option<AliasOp>, String> {
+    if rest.len() != 2 {
+        return Err("usage: unarg <name> <key>".to_string());
+    }
+    Ok(Some(AliasOp::DelArg {
+        name: rest[0].to_string(),
+        key: rest[1].to_string(),
+    }))
+}
+
+/// Whitespace-separated tokens of `s` with their byte offsets, e.g.
+/// `indexed_tokens(" a  bc ") == [(1, "a"), (4, "bc")]`. Used to slice the
+/// raw remainder after a token without re-joining (spacing survives).
+fn indexed_tokens(s: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, c) in s.char_indices() {
+        if c.is_whitespace() {
+            if let Some(st) = start.take() {
+                out.push((st, &s[st..i]));
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(st) = start {
+        out.push((st, &s[st..]));
+    }
+    out
 }
 
 fn parse_name_list(raw: &str) -> Result<(String, Vec<String>), String> {
@@ -159,7 +235,8 @@ fn parse_name_list(raw: &str) -> Result<(String, Vec<String>), String> {
 }
 
 /// Names and shortcuts may contain only alphanumerics, `-` and `_`.
-fn valid_ident(s: &str) -> bool {
+/// Public so the settings form validates its wizard input the same way.
+pub fn valid_ident(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -175,9 +252,54 @@ fn cmd_or_none(joined: &str) -> Option<String> {
     }
 }
 
+/// Set (or replace) named argument `key` on user alias `name` inside the
+/// persisted alias list. A built-in name is materialized as an overriding
+/// user definition first — that is how `:arg browser k v` persists. Returns
+/// the previous value when the key already existed. `Err` for unknown names.
+pub fn set_arg(
+    user: &mut Vec<AliasDef>,
+    name: &str,
+    key: &str,
+    value: &str,
+) -> Result<Option<String>, String> {
+    if let Some(def) = user.iter_mut().find(|d| d.name == name) {
+        return Ok(def.args.insert(key.to_string(), value.to_string()));
+    }
+    if let Some(mut def) = defaults().into_iter().find(|d| d.name == name) {
+        def.builtin = false;
+        let prev = def.args.insert(key.to_string(), value.to_string());
+        user.push(def);
+        return Ok(prev);
+    }
+    Err(format!("alias not found: {name}"))
+}
+
+/// Remove named argument `key` from user alias `name`. `Err` when the alias
+/// is unknown or does not carry that key.
+pub fn remove_arg(user: &mut [AliasDef], name: &str, key: &str) -> Result<(), String> {
+    match user.iter_mut().find(|d| d.name == name) {
+        Some(def) => match def.args.remove(key) {
+            Some(_) => Ok(()),
+            None => Err(format!("no named arg \"{key}\" on {name}")),
+        },
+        None => Err(format!("alias not found: {name}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn user_def(name: &str, linux: Option<&str>) -> AliasDef {
+        AliasDef {
+            name: name.to_string(),
+            shortcuts: vec![],
+            linux: linux.map(|s| s.to_string()),
+            macos: None,
+            args: BTreeMap::new(),
+            builtin: false,
+        }
+    }
 
     #[test]
     fn defaults_resolve_by_shortcut_and_name_any_case() {
@@ -188,6 +310,15 @@ mod tests {
         assert!(resolve(&defs, "Clipboard").is_some());
         assert!(resolve(&defs, "CD").is_some());
         assert!(resolve(&defs, "nope").is_none());
+    }
+
+    #[test]
+    fn clipboard_default_uses_native_backend() {
+        let defs = defaults();
+        let cd = resolve(&defs, "cd").expect("cd resolves");
+        assert_eq!(cd.linux.as_deref(), Some(crate::clipboard::TEMPLATE));
+        assert_eq!(cd.macos.as_deref(), Some(crate::clipboard::TEMPLATE));
+        assert!(cd.builtin);
     }
 
     #[test]
@@ -260,6 +391,84 @@ mod tests {
         assert_eq!(parse_colon_cmd("").unwrap(), None);
         assert_eq!(parse_colon_cmd("   ").unwrap(), None);
         assert_eq!(parse_colon_cmd("frobnicate x y").unwrap(), None);
+    }
+
+    #[test]
+    fn parse_arg_keeps_value_spacing() {
+        match parse_colon_cmd("arg br baidu https://www.baidu.com").unwrap().unwrap() {
+            AliasOp::SetArg { name, key, value } => {
+                assert_eq!(name, "br");
+                assert_eq!(key, "baidu");
+                assert_eq!(value, "https://www.baidu.com");
+            }
+            other => panic!("expected SetArg, got {other:?}"),
+        }
+        // the value is the raw remainder: internal spacing survives
+        match parse_colon_cmd("arg  t   here   cd /tmp  &&   ls ").unwrap().unwrap() {
+            AliasOp::SetArg { value, .. } => assert_eq!(value, "cd /tmp  &&   ls"),
+            other => panic!("expected SetArg, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_arg_requires_three_parts() {
+        assert!(parse_colon_cmd("arg").is_err());
+        assert!(parse_colon_cmd("arg br").is_err());
+        assert!(parse_colon_cmd("arg br baidu").is_err());
+    }
+
+    #[test]
+    fn parse_unarg() {
+        match parse_colon_cmd("unarg br baidu").unwrap().unwrap() {
+            AliasOp::DelArg { name, key } => {
+                assert_eq!(name, "br");
+                assert_eq!(key, "baidu");
+            }
+            other => panic!("expected DelArg, got {other:?}"),
+        }
+        assert!(parse_colon_cmd("unarg br").is_err());
+        assert!(parse_colon_cmd("unarg a b c").is_err());
+    }
+
+    #[test]
+    fn set_arg_on_user_alias_and_replacement() {
+        let mut user = vec![user_def("t", Some("echo {input}"))];
+        assert_eq!(set_arg(&mut user, "t", "here", "cd /tmp").unwrap(), None);
+        assert_eq!(set_arg(&mut user, "t", "here", "cd /var").unwrap(), Some("cd /tmp".into()));
+        assert_eq!(user[0].args.get("here").map(String::as_str), Some("cd /var"));
+        assert_eq!(
+            set_arg(&mut user, "nope", "k", "v").unwrap_err(),
+            "alias not found: nope"
+        );
+    }
+
+    #[test]
+    fn set_arg_on_builtin_materializes_user_override() {
+        let mut user = vec![];
+        assert_eq!(set_arg(&mut user, "browser", "baidu", "https://www.baidu.com").unwrap(), None);
+        assert_eq!(user.len(), 1);
+        assert!(!user[0].builtin, "override must be a plain user def");
+        assert!(user[0].linux.is_some(), "override keeps the command");
+        assert_eq!(
+            user[0].args.get("baidu").map(String::as_str),
+            Some("https://www.baidu.com")
+        );
+    }
+
+    #[test]
+    fn remove_arg_errors_and_success() {
+        let mut user = vec![user_def("t", Some("echo {input}"))];
+        set_arg(&mut user, "t", "here", "cd /tmp").unwrap();
+        assert!(remove_arg(&mut user, "t", "here").is_ok());
+        assert!(user[0].args.is_empty());
+        assert_eq!(
+            remove_arg(&mut user, "t", "here").unwrap_err(),
+            "no named arg \"here\" on t"
+        );
+        assert_eq!(
+            remove_arg(&mut user, "ghost", "here").unwrap_err(),
+            "alias not found: ghost"
+        );
     }
 
     #[test]

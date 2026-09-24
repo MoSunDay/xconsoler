@@ -18,7 +18,7 @@ use xconsoler::escguard::{self, EscGuard};
 use xconsoler::keyspec::{self, KeySpec};
 use xconsoler::platform;
 use xconsoler::render;
-use xconsoler::state::{self, App};
+use xconsoler::state::{self, App, Mode};
 use xconsoler::storage;
 use xconsoler::term::TerminalGuard;
 
@@ -59,6 +59,17 @@ fn main() {
         println!("{USAGE}");
         std::process::exit(0);
     }
+    // Detached child of the native clipboard backend (see src/clipboard.rs):
+    // runs headless, never touches the terminal or the TUI.
+    if args
+        .iter()
+        .skip(1)
+        .any(|a| a == xconsoler::clipboard::SERVE_FLAG)
+    {
+        xconsoler::clipboard::serve();
+        std::process::exit(0);
+    }
+
     let cli = match parse_args(&args) {
         Ok(cli) => cli,
         Err(e) => {
@@ -227,9 +238,15 @@ fn run(path: &Path, summon: bool, wake_override: Option<KeySpec>) -> Result<()> 
                 let mut events = guard.feed(key);
                 events.extend(resolve_held(&mut guard)?);
                 for key in events {
-                    // Key release/repeat is filtered inside `on_key`.
-                    let act = action::on_key(&app, key);
-                    app::apply(&mut app, act, pf, path);
+                    if matches!(&app.mode, Mode::Settings(_)) {
+                        // The settings page owns its keys; its pure transition
+                        // returns the new state + store (applied in place).
+                        app::apply_settings(&mut app, key, path);
+                    } else {
+                        // Key release/repeat is filtered inside `on_key`.
+                        let act = action::on_key(&app, key);
+                        app::apply(&mut app, act, pf, path);
+                    }
                 }
             }
             // Event::Resize (and mouse events): fall through, redraw above.

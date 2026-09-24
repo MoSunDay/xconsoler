@@ -1,0 +1,85 @@
+#!/bin/sh
+# xconsoler long-bar toggle for the desktop (XFCE/X11):
+# running -> dismiss; not running -> summon a top-center bar terminal
+# (titled "xconsoler", 0.7-alpha background when gnome-terminal allows).
+set -u
+UID_N=$(id -u)
+if pgrep -u "$UID_N" -f 'xconsoler --summon' >/dev/null 2>&1; then
+    pkill -u "$UID_N" -f 'xconsoler --summon'
+    exit 0
+fi
+# Screen width for centering (xrandr " connected" line, fallback 1920).
+SW=$(xrandr 2>/dev/null | awk '/ connected/ && !/disconnected/ {
+        if (match($0, /[0-9]+x[0-9]+\+/)) {
+            s = substr($0, RSTART, RLENGTH); sub(/x.*/, "", s); print s; exit
+        }}')
+[ -n "$SW" ] || SW=1920
+COLS=140; ROWS=14
+X=$(((SW - 1300) / 2)); [ "$X" -lt 0 ] && X=0
+GEOM="${COLS}x${ROWS}+${X}+48"
+
+# --- transparent bar profile (gnome-terminal) ---------------------------
+# Ensure a dedicated profile (visible-name "xconsoler") with
+# background-transparency-percent=$TRANS (70 => 0.7 alpha; override with
+# XC_TRANS). The profile uuid is generated once and pinned in
+# ~/.config/xconsoler/gt-profile; the ProfilesList entry is idempotent.
+CFG_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/xconsoler
+GT_PROFILE_FILE=$CFG_DIR/gt-profile
+TRANS=${XC_TRANS:-70}
+case "$TRANS" in '' | *[!0-9]*) TRANS=70 ;; esac
+[ "$TRANS" -le 100 ] || TRANS=100
+GT_LIST_KEY=/org/gnome/terminal/legacy/profiles:/list
+GT_PROFILE_BASE=/org/gnome/terminal/legacy/profiles:/
+
+# Echo the profile visible-name on success; return non-zero (silently)
+# otherwise -- the caller then summons without a profile (opaque bar).
+gt_ensure_profile() {
+    command -v gsettings >/dev/null 2>&1 && command -v dconf >/dev/null 2>&1 ||
+        return 1
+    mkdir -p "$CFG_DIR" 2>/dev/null || return 1
+    UUID=''
+    [ -f "$GT_PROFILE_FILE" ] &&
+        UUID=$(tr -d '[:space:]' <"$GT_PROFILE_FILE" | tr '[:upper:]' '[:lower:]')
+    printf '%s' "$UUID" | grep -Eq '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$' || {
+        command -v uuidgen >/dev/null 2>&1 || return 1
+        UUID=$(uuidgen) || return 1
+        printf '%s\n' "$UUID" >"$GT_PROFILE_FILE" 2>/dev/null || return 1
+    }
+    # gsettings get prints e.g. ['a', 'b'] or @as []
+    LIST_RAW=$(gsettings get org.gnome.Terminal.ProfilesList list 2>/dev/null) ||
+        return 1
+    if printf '%s' "$LIST_RAW" | grep -qF "'$UUID'"; then
+        NEW_LIST=''
+    else
+        case "$LIST_RAW" in
+            '@as '* | '[]'*) NEW_LIST="['$UUID']" ;;
+            *)
+                NEW_LIST=$(printf '%s' "$LIST_RAW" |
+                    sed -e 's/[[:space:]]*]$//' -e 's/[[:space:]]*$//')
+                NEW_LIST="$NEW_LIST, '$UUID']"
+                ;;
+        esac
+        dconf write "$GT_LIST_KEY" "$NEW_LIST" 2>/dev/null || return 1
+    fi
+    PROF=$GT_PROFILE_BASE:$UUID/
+    dconf write "${PROF}visible-name" "'xconsoler'" 2>/dev/null || return 1
+    dconf write "${PROF}use-transparent-background" true 2>/dev/null || return 1
+    dconf write "${PROF}background-transparency-percent" "$TRANS" 2>/dev/null ||
+        return 1
+    printf '%s\n' xconsoler
+}
+
+# --- summon --------------------------------------------------------------
+if command -v gnome-terminal >/dev/null 2>&1; then
+    PROFILE=$(gt_ensure_profile) || PROFILE=''
+    [ -n "$PROFILE" ] ||
+        echo "xc-bar: transparent profile unavailable, summoning opaque" >&2
+    set -- gnome-terminal --class=XConsoler --hide-menubar --title=xconsoler \
+        --geometry="$GEOM"
+    [ -n "$PROFILE" ] && set -- "$@" --window-with-profile="$PROFILE"
+    set -- "$@" -- xconsoler --summon
+    # Fully detached so ssh / keybinding callers never block on the terminal.
+    "$@" </dev/null >/dev/null 2>&1 &
+else
+    exec xterm -class XConsoler -geometry "$GEOM" -e xconsoler --summon
+fi

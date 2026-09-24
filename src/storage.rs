@@ -61,7 +61,7 @@ impl Default for Config {
 
 /// Persisted state. `aliases` holds user-defined aliases only; built-ins are
 /// merged back in at load time (see [`merge_aliases`]).
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Store {
     /// `#[serde(default)]`: stores written before the config existed load
     /// with the default wake key.
@@ -164,6 +164,7 @@ fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn user_def(name: &str, linux: Option<&str>) -> AliasDef {
         AliasDef {
@@ -171,6 +172,7 @@ mod tests {
             shortcuts: vec![],
             linux: linux.map(|s| s.to_string()),
             macos: None,
+            args: BTreeMap::new(),
             builtin: false,
         }
     }

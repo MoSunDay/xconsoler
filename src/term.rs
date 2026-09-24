@@ -13,6 +13,7 @@
 //! prints, so the message lands in a sane terminal instead of inside the
 //! alternate screen.
 
+use std::io::Write;
 use std::sync::Once;
 
 use anyhow::Result;
@@ -22,6 +23,27 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 
+/// Window/tab title shown while the TUI owns the terminal.
+pub const TITLE: &str = "xconsoler";
+
+/// OSC 0 sequence setting the window title (`ESC ] 0 ; title BEL`).
+pub fn set_title_seq(title: &str) -> Vec<u8> {
+    format!("\x1b]0;{title}\x07").into_bytes()
+}
+
+/// OSC 0 sequence clearing the title so the parent shell re-applies its own.
+pub fn clear_title_seq() -> Vec<u8> {
+    b"\x1b]0;\x07".to_vec()
+}
+
+/// Raw bytes to stdout, best-effort (ignore errors like everything else in
+/// the setup/teardown path).
+fn write_raw(bytes: &[u8]) {
+    let mut out = std::io::stdout();
+    let _ = out.write_all(bytes);
+    let _ = out.flush();
+}
+
 /// RAII handle holding the terminal in TUI mode (raw + alternate screen +
 /// hidden cursor). Construct with [`TerminalGuard::enter`]; drop to restore.
 pub struct TerminalGuard;
@@ -29,13 +51,15 @@ pub struct TerminalGuard;
 impl TerminalGuard {
     /// Put the terminal into TUI mode and install the panic hook. On any
     /// setup failure raw mode is rolled back so the process can exit into a
-    /// usable shell.
+    /// usable shell. Reached only after the tty gate in `main`, so the title
+    /// sequence never hits a pipe.
     pub fn enter() -> Result<Self> {
         enable_raw_mode()?;
         if let Err(e) = execute!(std::io::stdout(), EnterAlternateScreen, Hide) {
             let _ = disable_raw_mode();
             return Err(e.into());
         }
+        write_raw(&set_title_seq(TITLE));
         install_panic_hook();
         Ok(TerminalGuard)
     }
@@ -44,6 +68,9 @@ impl TerminalGuard {
     /// safe to call from a panic hook and from `Drop`.
     fn restore() {
         let _ = execute!(std::io::stdout(), Show, LeaveAlternateScreen);
+        // After leaving the alternate screen the title is cleared so the
+        // user's shell prompt re-applies its own (PROMPT_COMMAND etc.).
+        write_raw(&clear_title_seq());
         let _ = disable_raw_mode();
     }
 }
@@ -80,5 +107,12 @@ mod tests {
         // No fields, no state: Drop is the whole contract. (enter() itself
         // needs a real terminal, so it is exercised manually, not here.)
         let _guard = TerminalGuard;
+    }
+
+    #[test]
+    fn title_sequences_are_exact_bytes() {
+        assert_eq!(set_title_seq(TITLE), b"\x1b]0;xconsoler\x07".to_vec());
+        assert_eq!(set_title_seq("hello world"), b"\x1b]0;hello world\x07".to_vec());
+        assert_eq!(clear_title_seq(), b"\x1b]0;\x07".to_vec());
     }
 }

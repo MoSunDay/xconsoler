@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=xconsoler
+GenericName=Keyboard launcher
+Comment=Long-bar keyboard launcher: summon it, type an alias, hit Enter
+# scripts/xc-icon rewrites this to an absolute path when xc-bar is not on PATH
+Exec=xc-bar
+Icon=xconsoler
+Terminal=false
+Categories=Utility;
+Keywords=launcher;runner;command;tui;hotkey;
+# The summoned bar window sets WM_CLASS=XConsoler (scripts/xc-bar), so the
+# desktop matches it back to this entry and paints the icon below.
+StartupWMClass=XConsoler
+StartupNotify=false

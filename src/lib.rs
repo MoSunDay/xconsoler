@@ -1,6 +1,7 @@
 pub mod action;
 pub mod alias;
 pub mod app;
+pub mod clipboard;
 pub mod escguard;
 pub mod exec;
 pub mod fuzzy;
@@ -9,6 +10,10 @@ pub mod keyspec;
 pub mod matcher;
 pub mod platform;
 pub mod render;
+pub mod settings;
+pub mod settings_form;
+pub mod settings_view;
 pub mod state;
 pub mod storage;
 pub mod term;
+pub mod theme;
