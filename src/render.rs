@@ -467,9 +467,9 @@ mod tests {
         assert!(text.contains("❯ zzz"));
     }
 
-    /// Opacity-policy guard (`theme::OPACITY` = 0.7): only the selection row
-    /// and the cursor block may paint a background. Every other cell stays at
-    /// the terminal default so the host terminal's translucency shows through.
+    /// Background-policy guard: only the selection row and the cursor block
+    /// may paint a background. Every other cell stays at the terminal default,
+    /// which the host terminal profile colours (see `scripts/xc-bar`).
     #[test]
     fn only_selection_and_cursor_paint_backgrounds() {
         let mut store = Store::default();

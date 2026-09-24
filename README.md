@@ -178,14 +178,12 @@ and as `XConsoler` (the WM_CLASS `xc-bar` gives the summoned window, which is ho
 the taskbar finds the icon). Regenerating needs Pillow (`pip install pillow`).
 
 `xc-bar` spawns a `gnome-terminal` window (`--class=XConsoler`, 140x14 near
-the top) with a dedicated GNOME Terminal profile: 0.7 transparent
-(`background-transparency-percent=70`, linear in VTE, so 70% of the desktop
-shows through) over the pinned kanagawa palette (`background-color=#1f1f28`,
+the top) with a dedicated opaque GNOME Terminal profile over the pinned
+kanagawa palette (`use-transparent-background=false`, `background-color=#1f1f28`,
 `foreground-color=#dcdcdc`, `use-theme-colors=false`) because the launcher
-paints no backgrounds of its own. Override the transparency with e.g.
-`XC_TRANS=85 xc-bar`; profile setup is idempotent and falls back to an opaque
-window (one-line stderr warning) when gsettings/dconf are unavailable. It
-then runs `xconsoler --summon` inside that window. Calling it again while the bar is up kills
+paints no backgrounds of its own. Profile setup is idempotent and falls back
+to a default-coloured window (one-line stderr warning) when gsettings/dconf
+are unavailable. It then runs `xconsoler --summon` inside that window. Calling it again while the bar is up kills
 the bar instead of opening a second one, and a successful run dismisses it
 automatically, Spotlight-style.
 
