@@ -49,6 +49,11 @@ cleared again on exit, so your shell prompt can re-apply its own).
 | `browser` (`br`)  | `xdg-open {input} >/dev/null 2>&1`           | `open {input}`    |
 | `clipboard` (`cd`)| `@native clipboard` (built-in Rust backend)    | `@native clipboard` |
 
+Commands run in their own process group, so the apps they launch survive the
+bar dismissing itself (a summon success closes the terminal right away).
+Long-lived apps should still be backgrounded (`cmd <args> &`) so the bar
+returns and auto-dismisses without waiting on them.
+
 ## Custom aliases (`:` commands)
 
 Type a line starting with `:` and press Enter:

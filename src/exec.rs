@@ -1,6 +1,7 @@
 //! Command execution for aliases (template expansion + `sh -c`).
 
 use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use crate::alias::AliasDef;
@@ -118,6 +119,11 @@ pub fn run_alias(def: &AliasDef, input: &str, platform: Platform) -> ExecOutcome
     let mut child = match Command::new("sh")
         .arg("-c")
         .arg(&cmd)
+        // Own process group: a summon bar closes its terminal as soon as a
+        // run succeeds, and the hangup SIGHUPs the terminal's foreground
+        // group -- a browser that is still starting up would die with it.
+        // The new group is entered before `sh` execs, so there is no race.
+        .process_group(0)
         // stdin piped only when the template asks for it, otherwise null so
         // the child can never steal keystrokes from the TUI
         .stdin(if needs_stdin {
@@ -324,5 +330,29 @@ mod tests {
             }
             ExecOutcome::Success(_) => panic!("expected failure"),
         }
+    }
+
+    #[test]
+    fn child_runs_in_its_own_process_group() {
+        // A summon bar tears its terminal down right after a successful run,
+        // and the hangup SIGHUPs the terminal's foreground group: a browser
+        // still starting up would be killed. Children must not share it.
+        let out = std::env::temp_dir().join(format!("xc-pgid-{}.txt", std::process::id()));
+        let target = shell_quote(&out.display().to_string());
+        let d = def("pg", &format!("ps -o pgid= -p $$ > {target}"));
+        assert_eq!(
+            run_alias(&d, "", Platform::Linux),
+            ExecOutcome::Success("pg ok".to_string())
+        );
+        let child_pgid = std::fs::read_to_string(&out).unwrap().trim().to_string();
+        let _ = std::fs::remove_file(&out);
+        let own = Command::new("sh")
+            .arg("-c")
+            .arg("ps -o pgid= -p $$")
+            .output()
+            .unwrap();
+        let own_pgid = String::from_utf8_lossy(&own.stdout).trim().to_string();
+        assert!(!child_pgid.is_empty());
+        assert_ne!(child_pgid, own_pgid, "child must leave the bar's group");
     }
 }
