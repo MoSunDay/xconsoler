@@ -20,21 +20,18 @@ COLS=140; ROWS=14
 X=$(((SW - 1300) / 2)); [ "$X" -lt 0 ] && X=0
 GEOM="${COLS}x${ROWS}+${X}+48"
 
-# --- transparent bar profile (gnome-terminal) ---------------------------
-# Ensure a dedicated profile (visible-name "xconsoler") with
-# background-transparency-percent=$TRANS (70 => 70% transparent, alpha 0.3;
-# override with XC_TRANS). The profile uuid is generated once and pinned in
-# ~/.config/xconsoler/gt-profile; the ProfilesList entry is idempotent.
+# --- opaque bar profile (gnome-terminal) --------------------------------
+# Ensure a dedicated profile (visible-name "xconsoler"): opaque, with the
+# launcher palette pinned (no transparency). The profile uuid is generated
+# once and pinned in ~/.config/xconsoler/gt-profile; the ProfilesList entry
+# is idempotent.
 CFG_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/xconsoler
 GT_PROFILE_FILE=$CFG_DIR/gt-profile
-TRANS=${XC_TRANS:-70}
-case "$TRANS" in '' | *[!0-9]*) TRANS=70 ;; esac
-[ "$TRANS" -le 100 ] || TRANS=100
 GT_LIST_KEY=/org/gnome/terminal/legacy/profiles:/list
 GT_PROFILE_BASE=/org/gnome/terminal/legacy/profiles:/
 
 # Echo the profile visible-name on success; return non-zero (silently)
-# otherwise -- the caller then summons without a profile (opaque bar).
+# otherwise -- the caller then summons without a profile (default colours).
 gt_ensure_profile() {
     command -v gsettings >/dev/null 2>&1 && command -v dconf >/dev/null 2>&1 ||
         return 1
@@ -65,12 +62,13 @@ gt_ensure_profile() {
     fi
     PROF=$GT_PROFILE_BASE:$UUID/
     dconf write "${PROF}visible-name" "'xconsoler'" 2>/dev/null || return 1
-    dconf write "${PROF}use-transparent-background" true 2>/dev/null || return 1
-    dconf write "${PROF}background-transparency-percent" "$TRANS" 2>/dev/null ||
+    dconf write "${PROF}use-transparent-background" false 2>/dev/null ||
+        return 1
+    dconf write "${PROF}background-transparency-percent" 0 2>/dev/null ||
         return 1
     # VTE would otherwise inherit the GTK theme colours; pin the launcher
     # palette (#1f1f28 sumiInk0 / #dcdcdc fujiWhite, see src/theme.rs) so
-    # light text stays readable on the dark translucent bar.
+    # light text stays readable on the dark opaque bar.
     dconf write "${PROF}use-theme-colors" false 2>/dev/null || return 1
     dconf write "${PROF}background-color" "'#1f1f28'" 2>/dev/null || return 1
     dconf write "${PROF}foreground-color" "'#dcdcdc'" 2>/dev/null || return 1
@@ -81,7 +79,7 @@ gt_ensure_profile() {
 if command -v gnome-terminal >/dev/null 2>&1; then
     PROFILE=$(gt_ensure_profile) || PROFILE=''
     [ -n "$PROFILE" ] ||
-        echo "xc-bar: transparent profile unavailable, summoning opaque" >&2
+        echo "xc-bar: launcher profile unavailable, using default colours" >&2
     set -- gnome-terminal --class=XConsoler --hide-menubar --title=xconsoler \
         --geometry="$GEOM"
     [ -n "$PROFILE" ] && set -- "$@" --window-with-profile="$PROFILE"

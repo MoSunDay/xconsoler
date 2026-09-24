@@ -1,26 +1,18 @@
 //! Visual theme, ported from terminator-rust's default builtin theme
-//! (Kanagawa Wave) and tuned for 0.7 opacity.
+//! (Kanagawa Wave) for an opaque launcher bar.
 //!
 //! Source of truth: terminator-rust `crates/theme/src/builtin.rs`
-//! `kanagawa_wave()`. The opacity policy mirrors terminator-rust's
-//! `crates/app/src/render/colors.rs`: backgrounds carry the window alpha,
-//! while text, cursor and selection ink stay opaque for readability.
+//! `kanagawa_wave()`. The bar is opaque: the host terminal profile paints the
+//! background (see `scripts/xc-bar`, which pins the same `#1f1f28`), so the
+//! launcher paints no backgrounds of its own and text, cursor and selection
+//! ink stay readable.
 
 use ratatui::style::Color;
 
-/// Transparency the theme targets: the host terminal is expected to be 70%
-/// transparent (alpha 0.3), so every cell lets the desktop through. Terminal cells cannot carry alpha, so
-/// the launcher paints NO explicit backgrounds (cells stay at the terminal
-/// default) and the host terminal's translucency (e.g. terminator-rust
-/// window opacity / kitty `background_opacity`) shows through every cell of
-/// the bar, matching this 70%-transparent target. The few inks that must stay visible
-/// (selection, cursor) use the palette's own colors and remain opaque -
-/// the same policy as terminator-rust's `pane_bg_alpha`/`with_opacity`.
-pub const OPACITY: f32 = 0.7;
-
 /// Theme background: kanagawa `sumiInk0` #1f1f28 (terminator-rust palette
-/// `background`). Kept UNPAINTED - reference only - so terminal opacity
-/// applies to every cell instead of being overridden here.
+/// `background`). Kept UNPAINTED - reference only: the host terminal profile
+/// (matched in `scripts/xc-bar`) paints every cell, so the bar stays opaque
+/// and the palette keeps a single source of truth.
 pub const BG: Color = rgb(0x1f, 0x1f, 0x28);
 
 /// Primary text: kanagawa `fujiWhite` #dcdcdc (terminator-rust palette
@@ -97,8 +89,4 @@ mod tests {
         assert_ne!(channels(CURSOR), channels(BG));
     }
 
-    #[test]
-    fn opacity_target_is_the_documented_fraction() {
-        assert!((OPACITY - 0.7).abs() < f32::EPSILON);
-    }
 }
