@@ -13,13 +13,15 @@ use crate::state::{self, App};
 use crate::storage::Store;
 use crate::theme::{CURSOR, SELECT_BG};
 
-/// App with one recorded history entry (`br docs`) and the query `br`:
-/// the frame must show the history and alias rows plus the key hints.
+/// App with one recorded history entry (`br docs`) and the query `br`
+/// (caret at the end, like real typing): the frame must show the history and
+/// alias rows plus the key hints.
 pub(crate) fn app_with_history() -> App {
     let mut store = Store::default();
     record(&mut store, "br", "docs", 1);
     let mut app = state::new(store, false);
     app.input = "br".to_string();
+    app.caret = app.input.chars().count();
     app
 }
 
@@ -92,6 +94,18 @@ pub(crate) fn bg_rows(painted: &[CellPos], color: Color) -> std::collections::BT
         .filter(|(_, _, c)| *c == color)
         .map(|(_, y, _)| *y)
         .collect()
+}
+
+/// Symbol of one cell in a freshly drawn frame (empty string when the
+/// coordinates are outside the buffer).
+pub(crate) fn cell_symbol(app: &App, width: u16, height: u16, x: u16, y: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|f| draw(f, app)).unwrap();
+    let buf = terminal.backend().buffer();
+    if x >= buf.area.width || y >= buf.area.height {
+        return String::new();
+    }
+    buf[(x, y)].symbol().to_string()
 }
 
 /// Rows of the drawn candidate list (every history row starts with a

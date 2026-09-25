@@ -118,8 +118,10 @@ pub fn handle_key(st: &Settings, store: &Store, key: KeyEvent) -> (Settings, Sto
     }
     // ALT belongs to the launcher: the wake hotkey keeps working on this
     // page, and without this guard its plain-char arms (Alt+D => delete)
-    // would fire instead.
-    if key.modifiers.contains(KeyModifiers::ALT) {
+    // would fire instead. The wizard's input line is the exception: Alt+B /
+    // Alt+F must reach the form as word motions. Every other ALT key stays a
+    // no-op there too, because the form's plain-char arm excludes alt.
+    if key.modifiers.contains(KeyModifiers::ALT) && st.form.is_none() {
         return (st.clone(), store.clone(), Effect::None);
     }
     match st.form.as_ref() {
@@ -143,6 +145,7 @@ fn list_key(st: &Settings, store: &Store, key: KeyEvent) -> (Settings, Store, Ef
 
     match key.code {
         KeyCode::Char('c') if ctrl => effect = Effect::Quit,
+        KeyCode::Char('d') if ctrl => effect = Effect::Quit,
         KeyCode::Esc => effect = Effect::Back,
         KeyCode::Char('q') if !ctrl => effect = Effect::Back,
         KeyCode::Up => next.cursor = move_sel(&cur_rows, st.cursor, -1),
@@ -682,7 +685,7 @@ mod tests {
     }
 
     /// Alt+D (the default wake key) and the other modified chars must not
-    /// reach the plain-char arms: only Ctrl+C is a ctrl shortcut here.
+    /// reach the plain-char arms: only Ctrl+C / Ctrl+D quit from here.
     #[test]
     fn modified_char_keys_do_not_fire_list_actions() {
         let (st, store) = on_t();
@@ -699,7 +702,7 @@ mod tests {
             "Alt+K must not move the selection"
         );
 
-        for c in ['d', 'k', 'j', 'q', 'n', 's', 'a', 't', 'e'] {
+        for c in ['k', 'j', 'q', 'n', 's', 'a', 't', 'e'] {
             let ctrl = KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
             assert_eq!(
                 handle_key(&st, &store, ctrl),
@@ -711,12 +714,51 @@ mod tests {
     }
 
     #[test]
+    fn alt_word_motions_reach_the_form_but_stay_dead_on_the_list() {
+        let (st, store) = on_t();
+        let alt_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT);
+        assert_eq!(
+            handle_key(&st, &store, alt_d),
+            (st.clone(), store.clone(), Effect::None),
+            "Alt+D must not delete the selection from the list"
+        );
+
+        // ...but inside the wizard Alt+B / Alt+F move the form caret.
+        let (st, _, _) = handle_key(&st, &store, key(KeyCode::Char('e')));
+        let (st, _, _) = handle_key(&st, &store, key(KeyCode::End));
+        let form = st.form.as_ref().expect("edit wizard open");
+        assert_eq!(form.caret, "printf %s {input}".chars().count());
+
+        let alt_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT);
+        let (st, _, eff) = handle_key(&st, &store, alt_b);
+        assert_eq!(eff, Effect::None);
+        let form = st.form.as_ref().expect("form still open");
+        assert_eq!(
+            form.caret, 10,
+            "Alt+B jumps to the start of the placeholder"
+        );
+
+        // an unmapped ALT key in the form neither edits nor quits
+        let before = form.input.clone();
+        let (st, _, eff) = handle_key(&st, &store, alt_d);
+        assert_eq!(eff, Effect::None);
+        let form = st.form.as_ref().expect("form still open");
+        assert_eq!((form.input.clone(), form.caret), (before, 10));
+    }
+
+    #[test]
     fn ctrl_c_still_quits_from_the_list() {
         let (st, store) = on_t();
         let (_, _, eff) = handle_key(
             &st,
             &store,
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(eff, Effect::Quit);
+        let (_, _, eff) = handle_key(
+            &st,
+            &store,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
         );
         assert_eq!(eff, Effect::Quit);
     }

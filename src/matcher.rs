@@ -1,5 +1,6 @@
-//! Candidate ranking: matching history first (newest first), then concrete
-//! registered shortcuts by fuzzy score filling only the slots history leaves.
+//! Candidate ranking: history always outranks shortcuts (newest first), then
+//! the shortcut rows - alias-scoped for `<alias> <partial>`, fuzzy scored
+//! otherwise - fill only the slots history leaves.
 
 use crate::alias::{self, AliasDef};
 use crate::fuzzy;
@@ -20,32 +21,73 @@ pub enum Candidate {
     },
 }
 
-/// Rank candidates for `query` (whitespace-trimmed).
+/// The single ranking rule, for a raw (untrimmed) `input`:
 ///
-/// * Empty query: the most recent history entries only (newest first, no
-///   shortcut rows), up to `limit`.
-/// * Otherwise: history entries whose `"<entry label> <input>"` fuzzy-matches
-///   `query` come first, in store order (newest first, no score sort); then
-///   every alias shortcut whose `"<name> <triggers> <key> <value>"` matches,
-///   by fuzzy score descending, ties by alias order then key order.
-///   Shortcuts only fill the slots history leaves.
+/// * Empty/whitespace input: the most recent history entries only (newest
+///   first, no shortcut rows), up to `limit`.
+/// * Otherwise: every history entry whose `"<entry label> <input>"`
+///   fuzzy-matches the trimmed input comes first, in store order (newest
+///   first, no score sort); the shortcut rows follow, and the whole list is
+///   capped at `limit`. Those rows are the alias's concrete shortcut keys when
+///   the input is `<alias> <partial>` (see [`shortcut_candidates`]), otherwise
+///   every shortcut whose `"<name> <triggers> <key> <value>"` fuzzy-matches,
+///   by score descending, ties by alias order then key order.
+///
+/// History keeps the top slots even in the `<alias> <partial>` case: what was
+/// actually run predicts the next run better than a registry lookup that
+/// merely shares the same letters, so retyping `br b` re-offers the recorded
+/// `br baidu` first instead of burying it under the alias's key list.
+pub fn ranked_candidates(
+    store: &Store,
+    aliases: &[AliasDef],
+    input: &str,
+    limit: usize,
+) -> Vec<Candidate> {
+    let query = input.trim();
+    if query.is_empty() {
+        return recent_history(store, limit);
+    }
+
+    // `<alias> <partial>` narrows the shortcut rows to that alias's concrete
+    // keys; anything else (including a bare alias) fuzzy-ranks every shortcut.
+    // The raw `input` keeps the trailing space that marks the narrow case.
+    let scoped = shortcut_candidates(aliases, input, limit);
+    let shortcuts = if scoped.is_empty() {
+        fuzzy_shortcuts(aliases, query)
+    } else {
+        scoped
+    };
+
+    history_hits(store, aliases, query)
+        .into_iter()
+        .chain(shortcuts)
+        .take(limit)
+        .collect()
+}
+
+/// Rank candidates for `query` (whitespace-trimmed): the same rule as
+/// [`ranked_candidates`], for callers that already hold a trimmed query.
 pub fn candidates(
     store: &Store,
     aliases: &[AliasDef],
     query: &str,
     limit: usize,
 ) -> Vec<Candidate> {
-    let query = query.trim();
-    if query.is_empty() {
-        // Recent history only: an empty bar shows what was run last, never
-        // shortcuts (they come back as soon as a query character is typed).
-        return (0..store.history.len().min(limit))
-            .map(|idx| Candidate::History { idx })
-            .collect();
-    }
+    ranked_candidates(store, aliases, query, limit)
+}
 
-    // History hits stay in store order (newest first); no score sort.
-    let history: Vec<Candidate> = store
+/// The most recent history entries, newest first. An empty bar shows what was
+/// run last, never shortcuts (they come back as soon as a character is typed).
+fn recent_history(store: &Store, limit: usize) -> Vec<Candidate> {
+    (0..store.history.len().min(limit))
+        .map(|idx| Candidate::History { idx })
+        .collect()
+}
+
+/// History entries fuzzy-matching `query` on `"<entry label> <input>"`, in
+/// store order (newest first). No score sort: recency is the whole point.
+fn history_hits(store: &Store, aliases: &[AliasDef], query: &str) -> Vec<Candidate> {
+    store
         .history
         .iter()
         .enumerate()
@@ -57,8 +99,12 @@ pub fn candidates(
             fuzzy::score(query, &format!("{} {}", label, entry.input())).is_some()
         })
         .map(|(idx, _)| Candidate::History { idx })
-        .collect();
+        .collect()
+}
 
+/// Concrete shortcuts fuzzy-matching `query`, by score descending, ties by
+/// alias order then key order. Uncapped: the caller owns the limit.
+fn fuzzy_shortcuts(aliases: &[AliasDef], query: &str) -> Vec<Candidate> {
     // (score, alias order, key, candidate): only these rows get score-sorted.
     let mut ranked: Vec<(i32, usize, String, Candidate)> = aliases
         .iter()
@@ -81,19 +127,15 @@ pub fn candidates(
         })
         .collect();
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-
-    history
-        .into_iter()
-        .chain(ranked.into_iter().map(|t| t.3))
-        .take(limit)
-        .collect()
+    ranked.into_iter().map(|t| t.3).collect()
 }
 
 /// Concrete-shortcut sub-candidates for a raw input of the form
-/// `<alias> <partial>`. A bare `br` (no whitespace yet) keeps the normal
-/// history ranking; once there is a space the alias's shortcuts take over,
-/// ranked by fuzzy score on the key (every key when the partial is empty),
-/// ties by key order.
+/// `<alias> <partial>`. A bare `br` (no whitespace yet) yields nothing, so
+/// [`ranked_candidates`] falls back to the fuzzy-scored shortcut rows; once
+/// there is a space the alias's own shortcuts take over those rows, ranked by
+/// fuzzy score on the key (every key when the partial is empty), ties by key
+/// order. Matching history entries still outrank them.
 pub fn shortcut_candidates(aliases: &[AliasDef], input: &str, limit: usize) -> Vec<Candidate> {
     let mut parts = input.splitn(2, char::is_whitespace);
     let head = parts.next().unwrap_or("");
@@ -320,6 +362,69 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// The `<alias> <partial>` case narrows the shortcut rows to that alias's
+    /// own keys, but history still owns the top slots: a run the user actually
+    /// made predicts the next run better than a registry lookup that merely
+    /// shares the same letters.
+    #[test]
+    fn history_outranks_alias_scoped_shortcuts() {
+        let mut store = Store::default();
+        store.history.push(history("br", "baidu", 1));
+        let aliases = with_shortcuts();
+
+        let out = ranked_candidates(&store, &aliases, "br b", 5);
+        assert_eq!(out[0], Candidate::History { idx: 0 }, "history first");
+        assert_eq!(
+            out,
+            vec![
+                Candidate::History { idx: 0 },
+                Candidate::Shortcut {
+                    alias: "br".to_string(),
+                    key: "baidu".to_string()
+                },
+            ],
+            "then the alias's narrowed keys"
+        );
+    }
+
+    /// History alone can fill the whole cap: the alias-scoped shortcut rows are
+    /// pushed out entirely, exactly like the fuzzy-scored ones already were.
+    #[test]
+    fn history_can_fill_the_cap_before_alias_scoped_shortcuts() {
+        let mut store = Store::default();
+        store.history.push(history("br", "baidu", 3));
+        store.history.push(history("br", "bai", 2));
+        store.history.push(history("br", "b", 1));
+        let aliases = with_shortcuts();
+
+        let out = ranked_candidates(&store, &aliases, "br b", 2);
+        assert_eq!(
+            out,
+            vec![Candidate::History { idx: 0 }, Candidate::History { idx: 1 }],
+            "newest first, no slot left for the shortcuts"
+        );
+        assert!(
+            out.iter().all(|c| !matches!(c, Candidate::Shortcut { .. })),
+            "no shortcut row survives a full history: {out:?}"
+        );
+    }
+
+    /// `candidates` is the very same rule as `ranked_candidates`, so the
+    /// empty bar and the typed bar cannot drift apart.
+    #[test]
+    fn candidates_is_the_ranked_rule() {
+        let mut store = Store::default();
+        store.history.push(history("br", "baidu", 1));
+        let aliases = with_shortcuts();
+        for input in ["", "   ", "br", "br b", "baidu", "zzz"] {
+            assert_eq!(
+                candidates(&store, &aliases, input, 5),
+                ranked_candidates(&store, &aliases, input, 5),
+                "input {input:?}"
+            );
+        }
     }
 
     /// Only concrete registered shortcuts become rows: a single letter can

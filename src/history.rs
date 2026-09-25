@@ -1,12 +1,13 @@
 //! History recording on top of [`crate::storage::Store`].
 
-use crate::storage::{HistoryEntry, Store, MAX_HISTORY};
+use crate::storage::{trim_history, HistoryEntry, Store};
 
 /// Record an execution into `store.history`.
 ///
 /// Dedup is by the entry key (`alias` + NUL + plain input): an existing
 /// entry with the same key is removed first. The fresh entry is inserted at
-/// index 0 (newest first) and the list is truncated to [`MAX_HISTORY`].
+/// index 0 (newest first) and the list is trimmed to
+/// [`crate::storage::MAX_HISTORY`].
 /// Note: [`HistoryEntry::new`] always produces the canonical base64 form, so
 /// comparing `input_b64` is equivalent to comparing the decoded input while
 /// avoiding an O(n) decode per element.
@@ -16,12 +17,13 @@ pub fn record(store: &mut Store, alias: &str, input: &str, ts: u64) {
         .history
         .retain(|e| e.alias != alias || e.input_b64 != entry.input_b64);
     store.history.insert(0, entry);
-    store.history.truncate(MAX_HISTORY);
+    trim_history(&mut store.history);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::MAX_HISTORY;
 
     #[test]
     fn newest_entry_lands_at_head() {

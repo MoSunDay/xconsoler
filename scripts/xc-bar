@@ -29,25 +29,49 @@ set -u
 # --- height -------------------------------------------------------------
 # 4 rows (the 3-row input box + the status/hints row) with an empty store,
 # 2 more for the candidate list's own border/title plus one row per recent
-# entry once there is history, topping out at 16 for the 10 entries the list
-# shows by default (state::RECENT_LIMIT). The TUI shrinks the list into any
-# bar, so a store that cannot be read -- corrupt ones count as no history,
-# the launcher starts empty from them -- or a missing python3 keeps at most
-# the old 16-row default. XC_ROWS pins a fixed height; XC_PRINT_ROWS prints
-# the computed one and exits (used by tests).
+# entry once there is history. The cap is `state::MAX_BAR_ROWS` = 6 + 10 = 16:
+# the 6 fixed rows (3-row input box + 2-row candidate-list frame/title +
+# 1-row status line) plus the 10 recent entries `state::RECENT_LIMIT` shows
+# by default. The TUI shrinks the list into any bar, so a store that cannot
+# be read -- corrupt ones count as no history, the launcher starts empty from
+# them -- never grows past that cap; the number comes from the launcher
+# itself (`--print-rows`) with python3 as the fallback. XC_ROWS pins a fixed
+# height; XC_PRINT_ROWS prints the computed one and exits (used by tests).
+#
+# Resolve the binary up front: gnome-terminal-server can run with a stripped
+# environment (no PATH), where a bare `xconsoler` would not be found. A dev
+# checkout (`scripts/xc-bar`) also falls back to the sibling release build,
+# so the native helpers below work outside a system install too.
+XC_BIN=${XC_BIN:-}
+[ -n "$XC_BIN" ] || XC_BIN=$(command -v xconsoler 2>/dev/null || true)
+if [ ! -x "$XC_BIN" ]; then
+    XC_DIR=$(CDPATH= cd -P -- "$(dirname "$0")" 2>/dev/null && pwd)
+    for CAND in "$XC_DIR/xconsoler" "$XC_DIR/../target/release/xconsoler"; do
+        if [ -x "$CAND" ]; then XC_BIN=$CAND; break; fi
+    done
+fi
+[ -x "$XC_BIN" ] || XC_BIN=/usr/local/bin/xconsoler
+
 STORE_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/xconsoler/store.json
-HIST_ROWS=16
-if command -v python3 >/dev/null 2>&1; then
-    HIST_ROWS=$(python3 - "$STORE_FILE" 2>/dev/null <<'PY' || echo 16
+# One exec of the launcher itself beats python3 (~30ms saved on every
+# hotkey press); python3 stays as the fallback, where a missing/corrupt
+# store means the old 16-row default.
+HIST_ROWS=$("$XC_BIN" --print-rows --store "$STORE_FILE" 2>/dev/null || true)
+case "$HIST_ROWS" in
+    '' | *[!0-9]*)
+        HIST_ROWS=16
+        if command -v python3 >/dev/null 2>&1; then
+            HIST_ROWS=$(python3 - "$STORE_FILE" 2>/dev/null <<'PY' || echo 16
 import json, sys
 try:
     history = json.load(open(sys.argv[1])).get("history") or []
 except Exception:
     history = []
-print(4 if not history else 6 + min(len(history), 10))
+print(4 if not history else min(6 + min(len(history), 10), 16))  # 16 = state::MAX_BAR_ROWS (6 + RECENT_LIMIT)
 PY
 )
-fi
+        fi ;;
+esac
 case "${XC_ROWS:-}" in
     '' | *[!0-9]* | 0) ROWS=$HIST_ROWS ;;
     *) ROWS=$XC_ROWS ;;
@@ -57,11 +81,18 @@ esac
     exit 0
 }
 
+# One pkill suffices: pgrep+pkill scanned the whole process table twice,
+# which is ~30ms on a busy desktop. pkill's status separates the three
+# cases: 0 = a live bar was signalled (dismiss), 1 = no match (fall through
+# and summon), anything else is a pkill error (warn, then summon anyway).
 UID_N=$(id -u)
-if pgrep -u "$UID_N" -f 'xconsoler --summon' >/dev/null 2>&1; then
-    pkill -u "$UID_N" -f 'xconsoler --summon'
-    exit 0
-fi
+pkill -u "$UID_N" -f 'xconsoler --summon' 2>/dev/null
+PKILL_STATUS=$?
+case "$PKILL_STATUS" in
+    0) exit 0 ;;                          # a live bar was signalled: dismiss
+    1) ;;                                 # no bar: fall through and summon
+    *) echo "xc-bar: pkill failed (status $PKILL_STATUS)" >&2 ;;
+esac
 
 # Top edge for an H-pixel-high bar: centred on the pointer's height by
 # default, XC_Y pins a fixed offset instead (0 = screen top, the pre-
@@ -184,17 +215,19 @@ gt_ensure_profile() {
         dconf write "$GT_LIST_KEY" "$NEW_LIST" 2>/dev/null || return 1
     fi
     PROF=$GT_PROFILE_BASE:$UUID/
-    dconf write "${PROF}visible-name" "'xconsoler'" 2>/dev/null || return 1
-    dconf write "${PROF}use-transparent-background" true 2>/dev/null || return 1
-    # 0.7 alpha -> 30 (percent), see header comment.
-    dconf write "${PROF}background-transparency-percent" "$TRANS" 2>/dev/null ||
-        return 1
-    # VTE would otherwise inherit the GTK theme colours; pin the launcher
-    # palette (#1f1f28 sumiInk0 / #dcdcdc fujiWhite, see src/theme.rs) so
-    # light text stays readable on the translucent bar.
-    dconf write "${PROF}use-theme-colors" false 2>/dev/null || return 1
-    dconf write "${PROF}background-color" "'#1f1f28'" 2>/dev/null || return 1
-    dconf write "${PROF}foreground-color" "'#dcdcdc'" 2>/dev/null || return 1
+    # One `dconf load` (a single exec + DBus roundtrip) instead of seven
+    # `dconf write` calls for the same keys. 0.7 alpha -> 30 (percent), see
+    # header comment; VTE would otherwise inherit the GTK theme colours, so
+    # pin the launcher palette (#1f1f28 sumiInk0 / #dcdcdc fujiWhite, see
+    # src/theme.rs) to keep light text readable on the translucent bar.
+    dconf load "$PROF" 2>/dev/null <<KEYFILE || return 1
+visible-name='xconsoler'
+use-transparent-background=true
+background-transparency-percent=$TRANS
+use-theme-colors=false
+background-color='#1f1f28'
+foreground-color='#dcdcdc'
+KEYFILE
     printf '%s\n' xconsoler
 }
 
@@ -277,6 +310,9 @@ place_bar() {
 strip_decorations() {
     command -v xdotool >/dev/null 2>&1 && command -v xprop >/dev/null 2>&1 ||
         return 0
+    # Window ids on screen before this watcher started: a bar that is still
+    # closing must not be mistaken for the window summoned below.
+    OLD_IDS=$(xdotool search --class XConsoler 2>/dev/null | tr '\n' ' ')
     WID=''
     I=0
     while [ -z "$WID" ] && [ "$I" -lt 200 ]; do
@@ -322,18 +358,11 @@ strip_decorations() {
     done
 }
 
-# Resolve the binary up front: gnome-terminal-server can run with a stripped
-# environment (no PATH), where a bare `xconsoler` would not be found.
-XC_BIN=$(command -v xconsoler 2>/dev/null || true)
-[ -n "$XC_BIN" ] || XC_BIN=/usr/local/bin/xconsoler
-
 # --- summon --------------------------------------------------------------
-# Window ids on screen before this run: a bar that is still closing must
-# not be mistaken for the window summoned below. The watcher goes first so
-# it is already polling when the terminal appears -- that is what lets the
-# decoration hint land around the map and keeps the titlebar off screen.
-OLD_IDS=$(command -v xdotool >/dev/null 2>&1 &&
-    xdotool search --class XConsoler 2>/dev/null | tr '\n' ' ')
+# The watcher goes first so it is already polling when the terminal appears
+# -- that is what lets the decoration hint land around the map and keeps the
+# titlebar off screen. It captures the pre-existing window ids itself, so the
+# hotkey path never waits on that xdotool call.
 strip_decorations </dev/null >/dev/null 2>&1 &
 if command -v gnome-terminal >/dev/null 2>&1; then
     gt_no_header

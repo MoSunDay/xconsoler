@@ -37,25 +37,25 @@ pub fn apply(app: &mut App, action: Action, platform: Platform, path: &Path) {
         Action::PaletteAccept => palette_accept(app, path),
         Action::Execute => crate::run::execute(app, platform, path),
         Action::SubmitColon => submit_colon(app, path),
-        Action::InsertChar(c) => {
-            app.palette = None;
-            let mut s = app.input.clone();
-            s.push(c);
-            set_input(app, s);
-        }
-        Action::Backspace => {
-            app.palette = None;
-            let mut s = app.input.clone();
-            s.pop();
-            set_input(app, s);
-        }
-        Action::ClearInput => {
-            app.palette = None;
-            set_input(app, String::new());
-        }
+        Action::InsertChar(c) => edit(app, crate::textedit::insert(&app.input, app.caret, c)),
+        Action::Backspace => edit(app, crate::textedit::backspace(&app.input, app.caret)),
+        Action::DeleteForward => edit(app, crate::textedit::delete(&app.input, app.caret)),
+        Action::Motion(m) => app.caret = crate::textedit::motion(&app.input, app.caret, m),
+        Action::KillToStart => edit(app, crate::textedit::kill_to_start(&app.input, app.caret)),
+        Action::KillToEnd => edit(app, crate::textedit::kill_to_end(&app.input, app.caret)),
+        Action::KillWord => edit(app, crate::textedit::kill_word(&app.input, app.caret)),
+        Action::Transpose => edit(app, crate::textedit::transpose(&app.input, app.caret)),
         Action::MoveUp => move_selection(app, -1),
         Action::MoveDown => move_selection(app, 1),
     }
+}
+
+/// Apply one textedit result: replace input+caret, close the palette and
+/// reset the candidate cursor / transient status like [`set_input`].
+fn edit(app: &mut App, out: (String, usize)) {
+    let (s, caret) = out;
+    app.palette = None;
+    set_input_at(app, s, caret);
 }
 
 /// Target resolution via the selected candidate. `Err` carries the message
@@ -196,8 +196,17 @@ pub fn apply_settings(app: &mut App, key: KeyEvent, path: &Path) {
     crate::settings_apply::apply(app, key, path);
 }
 
-/// Replace the input; resets cursor and transient status.
+/// Replace the input; resets cursor and transient status. The caret lands at
+/// the END of the new text (used for palette prefill, clears, run reset).
 pub(crate) fn set_input(app: &mut App, s: String) {
+    let end = s.chars().count();
+    set_input_at(app, s, end);
+}
+
+/// Replace input + caret (clamped); resets cursor and transient status.
+/// Edit ops use this so the caret survives them.
+fn set_input_at(app: &mut App, s: String, caret: usize) {
+    app.caret = crate::textedit::clamp(&s, caret);
     app.input = s;
     app.cursor = 0;
     app.status = None;
@@ -256,6 +265,9 @@ fn rebuild_aliases(app: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    //! Unit tests for the apply/edit layer (`crate::app`): keys -> `Action` ->
+    //! text/caret mutations, kept beside the code they exercise.
+
     use super::*;
     use crate::colon::AliasOp;
     use crate::history;
@@ -493,6 +505,7 @@ mod tests {
         apply(&mut app, Action::InsertChar('b'), Platform::Linux, &path);
         assert_eq!(app.palette, None);
         assert_eq!(app.input, "b");
+        assert_eq!(app.caret, 1, "caret follows the typed char");
     }
 
     #[test]
@@ -728,3 +741,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod edit_tests;
