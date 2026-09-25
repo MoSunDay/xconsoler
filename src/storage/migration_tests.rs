@@ -17,6 +17,14 @@ fn corrupt_file_moves_aside_and_defaults() {
         path.is_file(),
         "a fresh seeded store replaces the corrupt file"
     );
+    let notice = store
+        .load_notice
+        .as_deref()
+        .expect("the corrupt replacement is reported");
+    assert!(
+        notice.contains("store.json.corrupt"),
+        "the notice names the backup: {notice}"
+    );
     assert!(dir.path().join("store.json.corrupt").is_file());
 }
 
@@ -27,6 +35,10 @@ fn missing_file_yields_a_seeded_store_on_disk() {
     let store = load_with_legacy(&path, None);
     assert_eq!(store.aliases, alias::defaults());
     assert!(store.history.is_empty());
+    assert!(
+        store.load_notice.is_none(),
+        "a clean load carries no notice"
+    );
     assert!(path.is_file(), "the seed is written back best-effort");
     assert_eq!(
         load_with_legacy(&path, None),

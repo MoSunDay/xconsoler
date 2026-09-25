@@ -13,7 +13,9 @@
 //!   execution (see [`crate::exec::run_alias`]).
 
 use std::collections::BTreeMap;
+use std::fmt;
 
+use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// A single alias definition; plain data, editable and deletable like any
@@ -59,14 +61,58 @@ struct RawAliasDef {
 }
 
 /// `"shortcuts"` is either the legacy trigger-word array or the current
-/// key → value map; the JSON shape tells the two apart.
-#[derive(Deserialize)]
-#[serde(untagged)]
+/// key → value map; the JSON shape tells the two apart. Hand-written rather
+/// than `#[serde(untagged)]` so a wrong type reports the accepted shapes
+/// instead of serde's generic "did not match any variant" message.
+#[derive(Debug)]
 enum RawShortcuts {
     /// Legacy form: `"shortcuts": ["tt", "tw"]` holds the trigger words.
     Triggers(Vec<String>),
     /// Current form: `"shortcuts": {"key": "value"}` holds the shortcut map.
     Map(BTreeMap<String, String>),
+}
+
+impl<'de> Deserialize<'de> for RawShortcuts {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ShortcutsVisitor;
+
+        impl<'de> Visitor<'de> for ShortcutsVisitor {
+            type Value = RawShortcuts;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(
+                    "an array of trigger words or an object mapping shortcut keys to arguments",
+                )
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut words = Vec::new();
+                while let Some(word) = seq.next_element::<String>()? {
+                    words.push(word);
+                }
+                Ok(RawShortcuts::Triggers(words))
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut pairs = BTreeMap::new();
+                while let Some((key, value)) = map.next_entry::<String, String>()? {
+                    pairs.insert(key, value);
+                }
+                Ok(RawShortcuts::Map(pairs))
+            }
+        }
+
+        deserializer.deserialize_any(ShortcutsVisitor)
+    }
 }
 
 impl<'de> Deserialize<'de> for AliasDef {
@@ -717,5 +763,20 @@ mod tests {
             "trigger already on t: T2"
         );
         assert_eq!(user, before);
+    }
+
+    #[test]
+    fn wrong_shortcuts_type_reports_the_accepted_shapes() {
+        let err = serde_json::from_str::<AliasDef>(r#"{"name":"t","shortcuts":42}"#).unwrap_err();
+        assert!(
+            err.to_string().contains("array of trigger words"),
+            "expectation is named, got: {err}"
+        );
+        let err =
+            serde_json::from_str::<AliasDef>(r#"{"name":"t","shortcuts":{"k":7}}"#).unwrap_err();
+        assert!(
+            err.to_string().contains("expected a string"),
+            "map values must be strings, got: {err}"
+        );
     }
 }
