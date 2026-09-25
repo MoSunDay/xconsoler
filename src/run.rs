@@ -229,7 +229,7 @@ mod tests {
         assert_eq!(reloaded.history.len(), 1);
         assert_eq!(reloaded.history[0].input(), "hello");
         assert_ne!(reloaded.history[0].input_b64, "hello"); // stored base64
-        assert_eq!(reloaded.aliases.len(), 3, "br, cd and t round-trip");
+        assert_eq!(reloaded.aliases.len(), 4, "br, cd, app and t round-trip");
         let t = reloaded.aliases.iter().find(|d| d.name == "t").unwrap();
         assert_eq!(t.triggers, vec!["tt".to_string()]);
     }
@@ -460,5 +460,18 @@ mod tests {
             clipboard_payload(false, "https://example.com"),
             "https://example.com"
         );
+    }
+
+    #[test]
+    fn app_input_is_never_base64_decoded() {
+        // `app` uses the `@native app` backend, not the clipboard one, so even
+        // an application name that happens to be valid base64 reaches the
+        // launcher verbatim (the decode would silently rename the target).
+        let def = crate::launch::default_def();
+        for platform in [Platform::Linux, Platform::Macos] {
+            let native_clipboard = exec::uses_native_clipboard(&def, platform);
+            assert!(!native_clipboard, "app is not the clipboard backend");
+            assert_eq!(clipboard_payload(native_clipboard, "aGVsbG8="), "aGVsbG8=");
+        }
     }
 }

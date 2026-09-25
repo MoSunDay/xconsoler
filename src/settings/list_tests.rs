@@ -32,11 +32,11 @@ fn type_str(st: &Settings, store: &Store, s: &str) -> Settings {
     st
 }
 
-/// Select alias `t` (index 2 of the stored list) with `t`'s 1 trigger +
-/// 1 concrete shortcut shown.
+/// Select alias `t` (index 3 of the stored list: br, cd, app, t) with `t`'s
+/// 1 trigger + 1 concrete shortcut shown.
 fn on_t() -> (Settings, Store) {
     let store = store_with_t();
-    let st = Settings { cursor: 2, ..new() };
+    let st = Settings { cursor: 3, ..new() };
     (st, store)
 }
 
@@ -45,18 +45,19 @@ fn rows_list_aliases_then_expanded_entries() {
     let store = store_with_t();
     let aliases = view(&store);
     let flat = rows(&aliases, None);
-    assert_eq!(flat.len(), 3); // br, cd, t
-    let expanded = rows(&aliases, Some(2));
+    assert_eq!(flat.len(), 4); // br, cd, app, t
+    let expanded = rows(&aliases, Some(3));
     assert_eq!(
         expanded,
         vec![
             Row::Alias { idx: 0 },
             Row::Alias { idx: 1 },
             Row::Alias { idx: 2 },
+            Row::Alias { idx: 3 },
             // expanded rows: triggers first, then concrete shortcuts
-            Row::Trigger { alias: 2, idx: 0 },
+            Row::Trigger { alias: 3, idx: 0 },
             Row::Shortcut {
-                alias: 2,
+                alias: 3,
                 key: "baidu".to_string()
             },
         ]
@@ -74,18 +75,18 @@ fn expanded_rows_list_every_trigger_and_shortcut() {
     t.triggers = vec!["tt".to_string(), "tw".to_string()];
     t.shortcuts.insert("cc".to_string(), "x".to_string());
     let aliases = view(&store);
-    let flat = rows(&aliases, Some(2));
+    let flat = rows(&aliases, Some(3));
     assert_eq!(
-        flat[3..7],
+        flat[4..8],
         [
-            Row::Trigger { alias: 2, idx: 0 },
-            Row::Trigger { alias: 2, idx: 1 },
+            Row::Trigger { alias: 3, idx: 0 },
+            Row::Trigger { alias: 3, idx: 1 },
             Row::Shortcut {
-                alias: 2,
+                alias: 3,
                 key: "baidu".to_string()
             },
             Row::Shortcut {
-                alias: 2,
+                alias: 3,
                 key: "cc".to_string()
             },
         ]
@@ -264,15 +265,15 @@ fn reclamp_keeps_the_cursor_on_a_row() {
     let store = store_with_t();
     let mut st = Settings {
         cursor: 4,
-        expanded: Some(2),
+        expanded: Some(3),
         ..new()
     };
     reclamp(&mut st, &store);
-    assert_eq!(st.cursor, 4, "rows: 3 aliases + 1 trigger + 1 shortcut");
+    assert_eq!(st.cursor, 4, "rows: 4 aliases + 1 trigger + 1 shortcut");
     let mut empty = new();
     empty.cursor = 7;
     reclamp(&mut empty, &Store::default());
-    assert_eq!(empty.cursor, 1, "clamped to the last of 2 aliases");
+    assert_eq!(empty.cursor, 2, "clamped to the last of 3 aliases");
 }
 
 #[test]
@@ -282,8 +283,8 @@ fn navigation_moves_and_clamps() {
     let flat = rows(&aliases, None);
     assert_eq!(move_sel(&flat, 0, -1), 0);
     assert_eq!(move_sel(&flat, 0, 1), 1);
-    assert_eq!(move_sel(&flat, 2, 5), 2);
-    assert_eq!(move_sel(&flat, 99, -1), 1);
+    assert_eq!(move_sel(&flat, 2, 5), 3);
+    assert_eq!(move_sel(&flat, 99, -1), 2);
     assert_eq!(move_sel(&[], 3, 1), 0);
 }
 
@@ -350,7 +351,7 @@ fn modified_char_keys_do_not_fire_list_actions() {
             "Ctrl+{c} must not fire the list actions"
         );
     }
-    assert_eq!(store.aliases.len(), 3, "no alias was deleted");
+    assert_eq!(store.aliases.len(), 4, "no alias was deleted");
 }
 
 #[test]

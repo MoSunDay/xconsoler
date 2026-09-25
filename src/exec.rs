@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 
 use crate::alias::AliasDef;
 use crate::clipboard;
+use crate::launch;
 use crate::platform::{self, Platform};
 
 /// Result of running an alias command.
@@ -173,6 +174,17 @@ pub fn run_alias(def: &AliasDef, input: &str, platform: Platform) -> ExecOutcome
         return match clipboard::copy(input) {
             Ok(()) => ExecOutcome::Success(format!("{} ok", def.name)),
             Err(msg) => ExecOutcome::Failure(msg),
+        };
+    }
+
+    // Built-in native backend (`@native app`): the input names an installed
+    // application. Resolution, scoring and spawning live in `crate::launch`;
+    // the raw (never base64 decoded) input is used as typed.
+    if launch::is_native(template) {
+        return match launch::launch(input, platform) {
+            launch::Outcome::Launched(label) => ExecOutcome::Success(format!("{label} launched")),
+            launch::Outcome::Started(label) => ExecOutcome::Started(format!("{label} started")),
+            launch::Outcome::Failed(msg) => ExecOutcome::Failure(msg),
         };
     }
 
@@ -416,6 +428,22 @@ mod tests {
         let both_blank = def_both("x", Some("   "), None);
         assert!(!uses_native_clipboard(&both_blank, Platform::Linux));
         assert!(!uses_native_clipboard(&both_blank, Platform::Macos));
+    }
+
+    #[test]
+    fn app_backend_answers_a_blank_name_before_scanning() {
+        let app = def_both("app", Some(launch::TEMPLATE), Some(launch::TEMPLATE));
+        // The app backend is not the clipboard one and never base64-decodes.
+        assert!(!uses_native_clipboard(&app, Platform::Linux));
+        assert!(!uses_native_clipboard(&app, Platform::Macos));
+        assert_eq!(
+            run_alias(&app, "   ", Platform::Linux),
+            ExecOutcome::Failure("app name required".to_string())
+        );
+        assert_eq!(
+            run_alias(&app, "", Platform::Macos),
+            ExecOutcome::Failure("app name required".to_string())
+        );
     }
 
     #[test]

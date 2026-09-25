@@ -168,7 +168,7 @@ fn merge_into_never_overwrites_and_only_adds_missing_keys() {
     let mut aliases = crate::alias::defaults();
     let fresh = [("x".to_string(), "https://x.example".to_string())];
     assert_eq!(merge_into(&mut aliases, "br", &fresh).unwrap(), 1);
-    assert_eq!(aliases.len(), 2, "edited in place, no copy appears");
+    assert_eq!(aliases.len(), 3, "edited in place, no copy appears");
     let br = aliases.iter().find(|d| d.name == "br").unwrap();
     assert_eq!(
         br.linux.as_deref(),
@@ -200,12 +200,12 @@ fn merge_into_never_overwrites_and_only_adds_missing_keys() {
             .map(String::as_str),
         Some("https://x.example")
     );
-    assert_eq!(aliases.len(), 2, "existing entries stay in place");
+    assert_eq!(aliases.len(), 3, "existing entries stay in place");
     assert_eq!(
         merge_into(&mut aliases, "ghost", &fresh).unwrap_err(),
         "alias not found: ghost"
     );
-    assert_eq!(aliases.len(), 2, "a missing target changes nothing");
+    assert_eq!(aliases.len(), 3, "a missing target changes nothing");
 }
 
 #[test]

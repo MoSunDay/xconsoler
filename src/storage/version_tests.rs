@@ -28,7 +28,7 @@ fn legacy_store_json_loads_and_saves_with_the_new_keys() {
     save(&path, &store).unwrap();
     let json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(json["version"], serde_json::json!(3));
+    assert_eq!(json["version"], serde_json::json!(4));
     let aliases = json["aliases"].as_array().unwrap();
     let mine = aliases.iter().find(|d| d["name"] == "mine").unwrap();
     assert_eq!(mine["triggers"], serde_json::json!(["tt", "tw"]));
@@ -46,7 +46,7 @@ fn shortcut_json_shapes_load_into_the_new_model() {
     let path = dir.path().join("store.json");
     fs::write(
         &path,
-        r#"{"version":3,"aliases":[{"name":"br","triggers":["b"],
+        r#"{"version":4,"aliases":[{"name":"br","triggers":["b"],
             "linux":"xdg-open {input}","macos":"open {input}",
             "shortcuts":{"zhipu":"https://bigmodel.cn/console/overview"}}],
             "history":[]}"#,
@@ -60,6 +60,11 @@ fn shortcut_json_shapes_load_into_the_new_model() {
     assert_eq!(
         br.shortcuts["zhipu"],
         "https://bigmodel.cn/console/overview"
+    );
+    assert_eq!(
+        store.aliases.len(),
+        1,
+        "a v4 snapshot is not backfilled with the newer seeds"
     );
 
     let parse = |json: &str| serde_json::from_str::<AliasDef>(json).unwrap();
@@ -75,10 +80,11 @@ fn shortcut_json_shapes_load_into_the_new_model() {
     assert!(!old.shortcuts.contains_key("k"));
 }
 
-/// Version 2 stores are full snapshots: the version bump to 3 must not
-/// merge the seeded defaults back in.
+/// Version 2 stores are full snapshots: the older version bumps must not
+/// merge the seeded defaults back in. The `app` seed added in version 4 is
+/// the exception - every snapshot older than 4 gets it appended once.
 #[test]
-fn version_2_store_is_not_merged_again() {
+fn version_2_store_keeps_its_aliases_and_gains_the_app_seed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.json");
     let old = Store {
@@ -91,11 +97,67 @@ fn version_2_store_is_not_merged_again() {
     let store = load(&path);
     assert_eq!(store.version, SCHEMA_VERSION);
     assert_eq!(
-        store.aliases.len(),
-        1,
-        "a v2 snapshot keeps exactly its own aliases"
+        store
+            .aliases
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["mine", "app"],
+        "a v2 snapshot keeps its aliases and gains only the new seed"
     );
-    assert_eq!(store.aliases[0].name, "mine");
+    assert_eq!(store.aliases[0].linux.as_deref(), Some("echo hi"));
+}
+
+/// Version 4 seeded `app`: v3 snapshots gain it at the end, while v4
+/// snapshots stay exactly as written.
+#[test]
+fn version_3_store_gains_the_app_alias_once() {
+    let dir = tempfile::tempdir().unwrap();
+    for version in [3u32, 4u32] {
+        let path = dir.path().join(format!("store-{version}.json"));
+        let saved = Store {
+            version,
+            aliases: vec![user_def("br", Some("echo replaced"))],
+            ..Store::default()
+        };
+        save(&path, &saved).unwrap();
+
+        let store = load(&path);
+        let names: Vec<&str> = store.aliases.iter().map(|d| d.name.as_str()).collect();
+        if version < 4 {
+            assert_eq!(
+                names,
+                vec!["br", "app"],
+                "a v{version} store gains the seed"
+            );
+            let app = &store.aliases[1];
+            assert_eq!(app.linux.as_deref(), Some(crate::launch::TEMPLATE));
+            assert_eq!(app.macos.as_deref(), Some(crate::launch::TEMPLATE));
+            assert!(app.triggers.is_empty());
+        } else {
+            assert_eq!(names, vec!["br"], "a v4 snapshot gains nothing");
+        }
+        assert_eq!(store.version, SCHEMA_VERSION);
+    }
+}
+
+/// A user alias that already owns the name `app` is never duplicated by the
+/// version-4 backfill, case-insensitively.
+#[test]
+fn a_stored_alias_named_app_wins_over_the_seed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+    let saved = Store {
+        version: 3,
+        aliases: vec![user_def("App", Some("echo mine"))],
+        ..Store::default()
+    };
+    save(&path, &saved).unwrap();
+
+    let store = load(&path);
+    assert_eq!(store.aliases.len(), 1, "the user's alias is not duplicated");
+    assert_eq!(store.aliases[0].name, "App");
+    assert_eq!(store.aliases[0].linux.as_deref(), Some("echo mine"));
 }
 
 /// A legacy store missing the map entirely (only the trigger array

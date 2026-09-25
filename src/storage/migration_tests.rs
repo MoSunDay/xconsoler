@@ -184,7 +184,7 @@ fn migration_merges_defaults_into_an_old_store() {
             .iter()
             .map(|d| d.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["br", "cd", "mine"],
+        vec!["br", "cd", "app", "mine"],
         "defaults come first, overrides replace in place, extras append"
     );
     let br = &store.aliases[0];
@@ -197,7 +197,7 @@ fn migration_keeps_a_seeded_store_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.json");
     let mut store = Store::default();
-    store.aliases.clear(); // the user deleted br and cd: stay deleted
+    store.aliases.clear(); // the user deleted br, cd and app: stay deleted
     save(&path, &store).unwrap();
 
     let loaded = load(&path);
@@ -223,7 +223,7 @@ fn store_without_version_is_migrated() {
             .iter()
             .map(|d| d.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["br", "cd", "mine"]
+        vec!["br", "cd", "app", "mine"]
     );
 }
 

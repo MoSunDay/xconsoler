@@ -122,6 +122,16 @@ mod tests {
     }
 
     #[test]
+    fn traditional_names_keep_every_character() {
+        // Coverage is the CJK block, not just GB2312: a zh_TW name must
+        // spell its full acronym instead of losing characters and leaving
+        // an unrelated two-letter key behind (顯示器 once spelled `qq`).
+        assert!(has("小小備忘錄", "xxbwl"), "{:?}", acronyms("小小備忘錄"));
+        assert_eq!(acronyms("顯示器"), vec!["xsq".to_string()]);
+        assert_eq!(acronyms("移除式裝置與媒體"), vec!["ycszzymt".to_string()]);
+    }
+
+    #[test]
     fn spaces_split_nothing_and_ascii_mixes_in() {
         // Every character contributes, so a two-word name spells one acronym
         // across the space.

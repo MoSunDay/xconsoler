@@ -36,11 +36,11 @@ fn type_str(st: &Settings, store: &Store, s: &str) -> Settings {
     st
 }
 
-/// Select alias `t` (index 2 of the stored list) with `t`'s 1 trigger +
-/// 1 concrete shortcut shown.
+/// Select alias `t` (index 3 of the stored list: br, cd, app, t) with `t`'s
+/// 1 trigger + 1 concrete shortcut shown.
 fn on_t() -> (Settings, Store) {
     let store = store_with_t();
-    let st = Settings { cursor: 2, ..new() };
+    let st = Settings { cursor: 3, ..new() };
     (st, store)
 }
 
@@ -84,7 +84,7 @@ fn edit_wizard_accepts_the_prefilled_text() {
 fn macos_page_opens_a_macos_only_single_step_editor() {
     let store = store_with_t(); // t stores a linux command only
     let st = Settings {
-        cursor: 2,
+        cursor: 3,
         platform: Platform::Macos,
         ..new_for(Platform::Macos)
     };

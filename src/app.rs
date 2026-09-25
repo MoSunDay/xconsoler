@@ -417,7 +417,7 @@ mod tests {
 
         type_str(&mut app, ":add t echo {input}", &path);
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
-        assert_eq!(app.store.aliases.len(), 3);
+        assert_eq!(app.store.aliases.len(), 4);
 
         // unknown command -> usage help, input kept
         type_str(&mut app, ":frobnicate", &path);
@@ -445,8 +445,15 @@ mod tests {
         app.input = ":del t".to_string(); // still exists
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
         assert_eq!(app.status, Some((true, "alias removed: t".to_string())));
-        assert_eq!(app.store.aliases.len(), 1, "only the other seed remains");
-        assert_eq!(app.store.aliases[0].name, "cd");
+        assert_eq!(app.store.aliases.len(), 2, "only the other seeds remain");
+        assert_eq!(
+            app.store
+                .aliases
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cd", "app"]
+        );
 
         app.input = ":del t".to_string();
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
@@ -609,7 +616,7 @@ mod tests {
             "the seeded shortcuts stay put"
         );
         assert!(def.linux.is_some(), "the seeded command stays put");
-        assert_eq!(app.store.aliases.len(), 2, "edited in place, not copied");
+        assert_eq!(app.store.aliases.len(), 3, "edited in place, not copied");
         // Re-registering an existing key reports an update, not an add.
         type_str(&mut app, ":arg br gh https://gitlab.com", &path);
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
@@ -660,8 +667,9 @@ mod tests {
 
         app.input = "/settings".to_string();
         apply(&mut app, Action::Execute, Platform::Linux, &path);
-        // stored rows: br(0), cd(1), t(2)
+        // stored rows: br(0), cd(1), app(2), t(3)
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        apply_settings(&mut app, down, &path);
         apply_settings(&mut app, down, &path);
         apply_settings(&mut app, down, &path);
         apply_settings(
@@ -669,8 +677,12 @@ mod tests {
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
             &path,
         );
-        assert_eq!(app.store.aliases.len(), 2, "only t was deleted");
+        assert_eq!(app.store.aliases.len(), 3, "only t was deleted");
         assert!(app.store.aliases.iter().all(|d| d.name != "t"));
+        assert!(
+            app.store.aliases.iter().any(|d| d.name == "app"),
+            "the app seed stays put"
+        );
         assert!(
             storage::load(&path).aliases.iter().all(|d| d.name != "t"),
             "deletion persisted"
@@ -750,7 +762,7 @@ mod tests {
             app.status,
             Some((true, "imported 0 chrome bookmarks into br".to_string()))
         );
-        assert_eq!(app.store.aliases.len(), 2, "no duplicate aliases appear");
+        assert_eq!(app.store.aliases.len(), 3, "no duplicate aliases appear");
 
         // Unknown alias: clear error, nothing imported.
         app.input = ":import-chrome ghost".to_string();

@@ -1,10 +1,11 @@
-//! Binary entry point: arg parsing, headless helpers (`--print-bind`,
-//! `--set-wake-key`), terminal lifecycle, and the event loop (with the
-//! ESC-tail guard so a split `ESC` + `d` still reads as `Alt+D`).
+//! Binary entry point: terminal lifecycle, window fitting and the event loop
+//! (with the ESC-tail guard so a split `ESC` + `d` still reads as `Alt+D`).
+//! Command-line parsing and the fully headless `--set-*` / `--print-*`
+//! helpers live in the `cli` module (see `src/cli.rs`).
 
 use std::io::stdout;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -26,46 +27,15 @@ use xconsoler::state::{self, App, Mode};
 use xconsoler::storage;
 use xconsoler::term::TerminalGuard;
 
-const USAGE: &str = "\
-xconsoler — long-bar keyboard launcher (alt+d to wake)
+mod cli;
 
-USAGE:
-    xconsoler [OPTIONS]
-
-OPTIONS:
-    --summon              shell-keybind mode: starts shown, wake key / Esc quits
-    --wake-key <spec>     wake key for this run only (e.g. alt+d, ctrl+g);
-                          also feeds --print-bind; not persisted
-    --set-wake-key <spec> save the wake key to the store, print a reminder to
-                          re-generate the shell binding, then exit (no TUI)
-    --command-key <spec>  command-palette key for this run only
-                          (default: the wake key); not persisted
-    --set-command-key <spec>
-                          save the command-palette key to the store
-                          (default: the wake key), then exit (no TUI)
-    --print-bind          print the shell binding line for the wake key, exit
-    --print-rows          print the desktop bar height in rows for the store,
-                          exit (used by scripts/xc-bar)
-    --shell <bash|zsh>    shell flavour for --print-bind (default: bash)
-    --store <path>        store.json location (default: $HOME/xconsoler/store.json)
-    -h, --help            show this help";
+use cli::{
+    parse_args, run_print_app, run_print_bind, run_print_rows, run_set_command_key,
+    run_set_wake_key, USAGE,
+};
 
 /// Tick cap: worst-case latency before a redraw / quit check.
 const POLL_TIMEOUT: Duration = Duration::from_millis(250);
-
-/// Parsed command line (plain data).
-#[derive(Debug)]
-struct Cli {
-    store: PathBuf,
-    summon: bool,
-    wake_key: Option<String>,
-    set_wake_key: Option<String>,
-    command_key: Option<String>,
-    set_command_key: Option<String>,
-    print_bind: bool,
-    print_rows: bool,
-    shell: String,
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -104,6 +74,9 @@ fn main() {
     }
     if cli.print_rows {
         run_print_rows(&cli.store);
+    }
+    if let Some(name) = cli.print_app.clone() {
+        run_print_app(&name);
     }
 
     // zle widgets (zsh) run external commands with stdin redirected from
@@ -146,153 +119,6 @@ fn main() {
     if let Err(e) = result {
         eprintln!("xconsoler: {e:#}");
         std::process::exit(1);
-    }
-}
-
-/// Parse argv (skipping argv[0]); `-h/--help` is handled by the caller.
-fn parse_args(args: &[String]) -> Result<Cli, String> {
-    let mut cli = Cli {
-        store: storage::default_path(),
-        summon: false,
-        wake_key: None,
-        set_wake_key: None,
-        command_key: None,
-        set_command_key: None,
-        print_bind: false,
-        print_rows: false,
-        shell: "bash".to_string(),
-    };
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--store" => cli.store = PathBuf::from(next_value(args, &mut i, "--store")?),
-            "--summon" => cli.summon = true,
-            "--wake-key" => cli.wake_key = Some(next_value(args, &mut i, "--wake-key")?),
-            "--set-wake-key" => {
-                cli.set_wake_key = Some(next_value(args, &mut i, "--set-wake-key")?)
-            }
-            "--command-key" => cli.command_key = Some(next_value(args, &mut i, "--command-key")?),
-            "--set-command-key" => {
-                cli.set_command_key = Some(next_value(args, &mut i, "--set-command-key")?)
-            }
-            "--print-bind" => cli.print_bind = true,
-            "--print-rows" => cli.print_rows = true,
-            "--shell" => {
-                let shell = next_value(args, &mut i, "--shell")?;
-                if shell != "bash" && shell != "zsh" {
-                    return Err(format!(
-                        "unsupported shell {shell:?} (use \"bash\" or \"zsh\")"
-                    ));
-                }
-                cli.shell = shell;
-            }
-            other => return Err(format!("unknown argument: {other}")),
-        }
-        i += 1;
-    }
-    Ok(cli)
-}
-
-/// Consume the value following a flag at index `i` (advancing `i`).
-fn next_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
-    *i += 1;
-    args.get(*i)
-        .cloned()
-        .ok_or_else(|| format!("{flag} requires a value"))
-}
-
-/// `--set-wake-key`: validate, persist, print confirmation + a reminder to
-/// re-generate the binding. Fully headless; always exits.
-fn run_set_wake_key(path: &Path, spec: &str) -> ! {
-    let mut store = storage::load(path);
-    if let Err(e) = storage::set_wake_key(&mut store, spec) {
-        eprintln!("xconsoler: {e}");
-        std::process::exit(2);
-    }
-    if let Err(e) = storage::save(path, &store) {
-        eprintln!("xconsoler: {e:#}");
-        std::process::exit(1);
-    }
-    println!("wake key saved: {}", store.config.wake_key);
-    println!("re-generate your shell binding and reload your rc file, e.g.:");
-    println!("  xconsoler --print-bind --shell bash");
-    std::process::exit(0);
-}
-
-/// `--set-command-key`: validate, persist, print confirmation. Fully
-/// headless; always exits.
-fn run_set_command_key(path: &Path, spec: &str) -> ! {
-    let mut store = storage::load(path);
-    if let Err(e) = storage::set_command_key(&mut store, spec) {
-        eprintln!("xconsoler: {e}");
-        std::process::exit(2);
-    }
-    if let Err(e) = storage::save(path, &store) {
-        eprintln!("xconsoler: {e:#}");
-        std::process::exit(1);
-    }
-    println!("command key saved: {}", store.config.command_key);
-    if store.config.command_key == store.config.wake_key {
-        println!(
-            "note: this equals the wake key - while hidden / in summon mode the \
-             wake key keeps priority"
-        );
-    }
-    std::process::exit(0);
-}
-
-/// `--print-rows`: desktop bar height for the stored history, one integer.
-///
-/// Same rule as [`fit::stable_rows`]: room for the history an empty bar
-/// lists and never less than the typed candidate set, so the launch geometry
-/// is also the height the bar keeps for the session. Fully headless; always
-/// exits.
-fn run_print_rows(path: &Path) -> ! {
-    let store = storage::load(path);
-    let visible = store.history.len().max(state::CANDIDATE_LIMIT);
-    println!("{}", state::bar_rows(visible));
-    std::process::exit(0);
-}
-
-/// `--print-bind`: key = `--wake-key` override, else the stored config.
-/// Fully headless; always exits.
-fn run_print_bind(cli: &Cli) -> ! {
-    let store = storage::load(&cli.store);
-    let spec = cli.wake_key.as_deref().unwrap_or(&store.config.wake_key);
-    let key = match keyspec::parse(spec) {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("xconsoler: {e}");
-            std::process::exit(2);
-        }
-    };
-    match build_bind_lines(&cli.shell, &key) {
-        Ok(lines) => {
-            print!("{lines}");
-            std::process::exit(0);
-        }
-        Err(e) => {
-            eprintln!("xconsoler: {e}");
-            std::process::exit(2);
-        }
-    }
-}
-
-/// Shell binding text for a wake key (`bash` / `zsh`), newline-terminated.
-/// The `\ed` / `\C-g` sequences are the literal readline spellings produced
-/// by [`keyspec::readline_seq`].
-fn build_bind_lines(shell: &str, spec: &KeySpec) -> Result<String, String> {
-    let seq = keyspec::readline_seq(spec);
-    match shell {
-        "bash" => Ok(format!(
-            "bind -x '\"{seq}\": \"xconsoler --summon\"' 2>/dev/null || true\n"
-        )),
-        "zsh" => Ok(format!(
-            "xconsoler_invoke() {{ zle -I; xconsoler --summon \"$@\" </dev/tty; zle reset-prompt }}\n\
-             zle -N xconsoler_invoke\n\
-             bindkey '{seq}' xconsoler_invoke\n"
-        )),
-        other => Err(format!("unsupported shell {other:?} (use \"bash\" or \"zsh\")")),
     }
 }
 
@@ -614,114 +440,6 @@ fn resolve_held(guard: &mut EscGuard) -> Result<Vec<KeyEvent>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn args(list: &[&str]) -> Vec<String> {
-        std::iter::once("xconsoler".to_string())
-            .chain(list.iter().map(|s| s.to_string()))
-            .collect()
-    }
-
-    #[test]
-    fn bash_bind_line_for_alt_d() {
-        let k = keyspec::parse("alt+d").unwrap();
-        assert_eq!(
-            build_bind_lines("bash", &k).unwrap(),
-            "bind -x '\"\\ed\": \"xconsoler --summon\"' 2>/dev/null || true\n"
-        );
-    }
-
-    #[test]
-    fn bash_bind_line_for_ctrl_g() {
-        let k = keyspec::parse("ctrl+g").unwrap();
-        assert_eq!(
-            build_bind_lines("bash", &k).unwrap(),
-            "bind -x '\"\\C-g\": \"xconsoler --summon\"' 2>/dev/null || true\n"
-        );
-    }
-
-    #[test]
-    fn zsh_bind_lines() {
-        let k = keyspec::parse("alt+d").unwrap();
-        assert_eq!(
-            build_bind_lines("zsh", &k).unwrap(),
-            "xconsoler_invoke() { zle -I; xconsoler --summon \"$@\" </dev/tty; zle reset-prompt }\n\
-             zle -N xconsoler_invoke\n\
-             bindkey '\\ed' xconsoler_invoke\n"
-        );
-    }
-
-    #[test]
-    fn unsupported_shell_is_rejected() {
-        let k = keyspec::parse("alt+d").unwrap();
-        assert!(build_bind_lines("fish", &k).is_err());
-    }
-
-    #[test]
-    fn parse_args_defaults() {
-        let cli = parse_args(&args(&[])).unwrap();
-        assert_eq!(cli.store, storage::default_path());
-        assert!(!cli.summon);
-        assert_eq!(cli.wake_key, None);
-        assert_eq!(cli.set_wake_key, None);
-        assert_eq!(cli.command_key, None);
-        assert_eq!(cli.set_command_key, None);
-        assert!(!cli.print_bind);
-        assert!(!cli.print_rows);
-        assert_eq!(cli.shell, "bash");
-    }
-
-    #[test]
-    fn parse_args_all_flags() {
-        let cli = parse_args(&args(&[
-            "--summon",
-            "--wake-key",
-            "ctrl+g",
-            "--print-bind",
-            "--print-rows",
-            "--shell",
-            "zsh",
-            "--store",
-            "/tmp/s.json",
-        ]))
-        .unwrap();
-        assert!(cli.summon);
-        assert_eq!(cli.wake_key.as_deref(), Some("ctrl+g"));
-        assert!(cli.print_bind);
-        assert!(cli.print_rows);
-        assert_eq!(cli.shell, "zsh");
-        assert_eq!(cli.store, PathBuf::from("/tmp/s.json"));
-    }
-
-    #[test]
-    fn parse_args_set_wake_key() {
-        let cli = parse_args(&args(&["--set-wake-key", "alt+j"])).unwrap();
-        assert_eq!(cli.set_wake_key.as_deref(), Some("alt+j"));
-    }
-
-    #[test]
-    fn parse_args_command_keys() {
-        let cli = parse_args(&args(&[
-            "--command-key",
-            "ctrl+k",
-            "--set-command-key",
-            "alt+j",
-        ]))
-        .unwrap();
-        assert_eq!(cli.command_key.as_deref(), Some("ctrl+k"));
-        assert_eq!(cli.set_command_key.as_deref(), Some("alt+j"));
-    }
-
-    #[test]
-    fn parse_args_rejects_bad_input() {
-        assert!(parse_args(&args(&["--store"])).is_err());
-        assert!(parse_args(&args(&["--wake-key"])).is_err());
-        assert!(parse_args(&args(&["--set-wake-key"])).is_err());
-        assert!(parse_args(&args(&["--command-key"])).is_err());
-        assert!(parse_args(&args(&["--set-command-key"])).is_err());
-        assert!(parse_args(&args(&["--shell", "fish"])).is_err());
-        assert!(parse_args(&args(&["--shell"])).is_err());
-        assert!(parse_args(&args(&["--bogus"])).is_err());
-    }
 
     #[test]
     fn wake_key_stays_global_on_the_settings_page() {
