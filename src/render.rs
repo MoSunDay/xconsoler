@@ -318,11 +318,18 @@ mod tests {
         );
         assert_eq!(text.matches('╭').count(), 2, "box + list block: {text}");
         assert_eq!(
-            row_of(&text, "↻ br docs"),
+            row_of(&text, "↻ br ***"),
             Some(INPUT_BOX_H as usize + 1),
             "first list row under the box: {text}"
         );
-        assert!(text.contains("↳ br baidu ·"), "shortcut row: {text}");
+        assert!(
+            text.contains("↳ br baidu"),
+            "shortcut row names the key: {text}"
+        );
+        assert!(
+            !text.contains("https://www.baidu.com"),
+            "the registered value is never drawn: {text}"
+        );
         assert!(
             text.contains("matches · 1 history · 2 shortcut"),
             "list title: {text}"
@@ -529,7 +536,7 @@ mod tests {
         app.status = Some((false, "no match".to_string()));
         let err = draw_once(&app);
         assert_eq!(row_of(&err, "✗ no match"), Some(below), "{err}");
-        assert!(err.contains("↻ br docs"), "list stays: {err}");
+        assert!(err.contains("↻ br ***"), "list stays: {err}");
     }
 
     #[test]
