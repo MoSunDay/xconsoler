@@ -1,10 +1,14 @@
-//! Window auto-fit: once the bar is open, the terminal window follows the
-//! candidate set - the history rows on an empty bar, the ranked candidates
-//! while typing, the command palette while it is open, a full screen for
-//! `/settings`.
+//! Window auto-fit: the bar's frame is sized once per session and then stays
+//! put - the height carries the stored history (what the empty bar lists) and
+//! is never smaller than the typed candidate set, so typing a query only
+//! changes the list's *contents*, never the window around it. The command
+//! palette keeps one fixed height for its whole open session (its fuzzy
+//! filter must not resize the frame per keystroke); only `/settings`, a full
+//! page rather than a bar, asks for a different window.
 //!
-//! `scripts/xc-bar` picks the *launch* geometry from the stored history, so
-//! the first frame is already right; this module keeps it right afterwards.
+//! `scripts/xc-bar` picks the *launch* geometry with the same rule (see
+//! `--print-rows`), so the first frame already has the session height; this
+//! module pins it there afterwards.
 //! Two mechanisms, both best effort, and a retry policy ([`may_ask`]) that
 //! covers a window which is still being mapped or focused - where the first
 //! request goes nowhere - without asking a terminal that ignores the request
@@ -33,7 +37,7 @@
 use std::time::Duration;
 
 use crate::commands;
-use crate::state::{self, App, Mode, Visibility};
+use crate::state::{self, App, Mode};
 
 /// How many event-loop ticks a height request is repeated. Terminals apply
 /// the request asynchronously and a window manager may not have activated the
@@ -55,26 +59,30 @@ pub const MAX_ASKS: u8 = 8;
 /// fixed comfortable height instead of one derived from a candidate count.
 pub const SETTINGS_ROWS: u16 = 24;
 
+/// Rows the normal bar keeps for the whole session: room for the stored
+/// history an empty bar lists, and never less than the typed candidate set,
+/// so neither typing nor replaying changes the frame's height.
+pub fn stable_rows(app: &App) -> u16 {
+    state::bar_rows(app.store.history.len().max(state::CANDIDATE_LIMIT))
+}
+
 /// Rows the window should have for `app` right now.
 ///
 /// The launcher reuses [`state::bar_rows`] - box, list frame, one row per
 /// entry, status row, capped by `state::MAX_BAR_ROWS` - so the summoned
 /// height and the fitted height can never disagree about the geometry.
-pub fn desired_rows(app: &App) -> u16 {
+/// Normal and hidden modes keep the session's [`stable_rows`]; the palette
+/// keeps one fixed height of its own, because its fuzzy filter changes the
+/// visible rows, not the window, and `/settings` is the one page that asks
+/// for its full height.
+pub fn desired_rows(app: &App, stable: u16) -> u16 {
     if matches!(app.mode, Mode::Settings(_)) {
         return SETTINGS_ROWS;
     }
-    if app.visibility != Visibility::Shown {
-        // A hidden bar is just the bare box; leave the window alone.
-        return state::bar_rows(0);
+    if app.palette.is_some() {
+        return stable.max(state::bar_rows(commands::len()));
     }
-    // While the palette is open it replaces the candidate list, so the rows
-    // its current `:`/`/` query shows are what need room.
-    let items = match app.palette {
-        Some(_) => commands::palette_items(&app.input).len(),
-        None => state::candidates(app).len(),
-    };
-    state::bar_rows(items)
+    stable
 }
 
 /// Whether the fit may ask for its height again: `tries` asks went out, the
@@ -181,6 +189,7 @@ fn is_executable(path: &std::path::Path) -> bool {
 mod tests {
     use super::*;
     use crate::alias::{self, AliasDef};
+    use crate::state::Visibility;
     use crate::storage::{HistoryEntry, Store};
 
     fn app(history: usize) -> App {
@@ -207,58 +216,58 @@ mod tests {
     }
 
     #[test]
-    fn rows_follow_the_history_on_an_empty_bar() {
-        assert_eq!(desired_rows(&app(0)), 4, "box + status");
-        assert_eq!(desired_rows(&app(1)), 7, "+ list frame + 1 row");
-        assert_eq!(desired_rows(&app(3)), 9);
-        assert_eq!(desired_rows(&app(10)), state::MAX_BAR_ROWS);
-        // Same rule as the launch geometry: --print-rows and the fitted
-        // height agree by construction.
-        assert_eq!(desired_rows(&app(3)), state::bar_rows(3));
+    fn stable_rows_keeps_room_for_history_and_typed_candidates() {
+        // Room for CANDIDATE_LIMIT typed candidates even with no history...
+        assert_eq!(
+            stable_rows(&app(0)),
+            state::bar_rows(state::CANDIDATE_LIMIT)
+        );
+        assert_eq!(
+            stable_rows(&app(3)),
+            state::bar_rows(state::CANDIDATE_LIMIT)
+        );
+        // ...and for the stored history once it is the larger side.
+        assert_eq!(stable_rows(&app(6)), state::bar_rows(6));
+        assert_eq!(stable_rows(&app(10)), state::MAX_BAR_ROWS);
+        // The launch geometry (`--print-rows`) uses the same rule, so the
+        // first frame already has this height.
     }
 
     #[test]
-    fn rows_follow_the_typed_candidates() {
+    fn desired_rows_ignores_the_live_candidates() {
         let mut a = app(1); // history: `br baidu 0`
+        let stable = stable_rows(&a);
         a.input = "br b".to_string();
         // History first, then the alias's `baidu`/`bing` rows.
         assert_eq!(state::candidates(&a).len(), 3);
-        assert_eq!(desired_rows(&a), 9);
+        assert_eq!(desired_rows(&a, stable), stable);
         a.input = "zzz".to_string();
         assert_eq!(state::candidates(&a).len(), 0);
-        assert_eq!(desired_rows(&a), 4, "no matches: back to the bare box");
+        assert_eq!(desired_rows(&a, stable), stable, "no matches: same frame");
     }
 
     #[test]
-    fn palette_and_settings_get_their_own_heights() {
+    fn palette_height_is_fixed_and_settings_gets_its_page() {
         let mut a = app(0);
+        let stable = stable_rows(&a);
         a.palette = Some(0);
-        assert_eq!(desired_rows(&a), state::bar_rows(commands::len()));
-        assert!(desired_rows(&a) > 4);
-        a.palette = None;
-        a.mode = Mode::Settings(Box::new(crate::settings::new()));
-        assert_eq!(desired_rows(&a), SETTINGS_ROWS);
-    }
-
-    #[test]
-    fn palette_height_follows_the_slash_query() {
-        let mut a = app(0);
-        a.palette = Some(0);
-        a.input = "/".to_string();
-        assert_eq!(desired_rows(&a), state::bar_rows(1), "only /settings");
-
+        let palette = desired_rows(&a, stable);
+        assert_eq!(palette, stable.max(state::bar_rows(commands::len())));
+        // The fuzzy filter shrinks the visible rows, never the window.
         a.input = "/zz".to_string();
-        assert_eq!(desired_rows(&a), 4, "no matches: the bare box");
-
+        assert_eq!(desired_rows(&a, stable), palette);
         a.palette = None;
-        assert_eq!(desired_rows(&a), 4, "closed palette: still the bare box");
+        assert_eq!(desired_rows(&a, stable), stable);
+        a.mode = Mode::Settings(Box::new(crate::settings::new()));
+        assert_eq!(desired_rows(&a, stable), SETTINGS_ROWS);
     }
 
     #[test]
-    fn hidden_bar_keeps_the_bare_box() {
+    fn hidden_bar_keeps_the_session_height() {
         let mut a = app(3);
+        let stable = stable_rows(&a);
         a.visibility = Visibility::Hidden;
-        assert_eq!(desired_rows(&a), 4);
+        assert_eq!(desired_rows(&a, stable), stable);
     }
 
     #[test]
