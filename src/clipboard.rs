@@ -1,5 +1,10 @@
 //! Native clipboard backend for the seeded `cd` alias.
 //!
+//! The text handed to [`copy`] is the decoded payload, i.e. exactly what
+//! lands on the clipboard. Base64 is only the input/storage form of `cd`
+//! (`history` keeps `input_b64`), decoded by [`crate::run`] before this
+//! layer is reached.
+//!
 //! Alias templates equal to [`TEMPLATE`] are dispatched here by
 //! [`crate::exec::run_alias`] instead of `sh -c`, so the feature needs no
 //! external tools (`xclip` / `wl-copy` / `xsel` / `pbcopy`) and no system
@@ -33,7 +38,8 @@ pub fn is_native(template: &str) -> bool {
     template.trim() == TEMPLATE
 }
 
-/// Copy `text` to the system clipboard without external tools.
+/// Copy `text` -- the decoded payload, as described in the module docs --
+/// to the system clipboard without external tools.
 ///
 /// The in-process copy runs first so connection errors surface in the
 /// status line; on Linux a detached child is then spawned to keep owning
