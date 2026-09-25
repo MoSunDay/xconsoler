@@ -15,21 +15,34 @@ fn user_def(name: &str, linux: Option<&str>) -> AliasDef {
 }
 
 #[test]
-fn defaults_are_exactly_br_and_cd_and_resolve_by_name_any_case() {
+fn defaults_are_exactly_br_cd_and_app_and_resolve_by_name_any_case() {
     let defs = defaults();
     assert_eq!(
         defs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
-        vec!["br", "cd"],
-        "the seeded defaults are exactly br and cd"
+        vec!["br", "cd", "app"],
+        "the seeded defaults are exactly br, cd and app"
     );
     assert!(defs.iter().all(|d| d.triggers.is_empty()));
     let br = resolve(&defs, "br").expect("br resolves");
     assert_eq!(br.name, "br");
     assert!(resolve(&defs, "BR").is_some());
     assert!(resolve(&defs, "Cd").is_some());
+    assert!(resolve(&defs, "App").is_some());
     assert!(resolve(&defs, "nope").is_none());
     assert!(resolve(&defs, "browser").is_none());
     assert!(resolve(&defs, "clipboard").is_none());
+}
+
+#[test]
+fn app_default_uses_native_backend() {
+    let defs = defaults();
+    let app = resolve(&defs, "app").expect("app resolves");
+    assert_eq!(app.name, "app");
+    assert!(app.triggers.is_empty(), "the input is the app name");
+    assert!(app.shortcuts.is_empty());
+    assert_eq!(app.linux.as_deref(), Some(crate::launch::TEMPLATE));
+    assert_eq!(app.macos.as_deref(), Some(crate::launch::TEMPLATE));
+    assert_eq!(app, &crate::launch::default_def());
 }
 
 #[test]
@@ -131,7 +144,7 @@ fn set_shortcut_edits_a_seeded_alias_in_place() {
         set_shortcut(&mut user, "br", "gh", "https://github.com").unwrap(),
         None
     );
-    assert_eq!(user.len(), 2, "no duplicate definition appears");
+    assert_eq!(user.len(), 3, "no duplicate definition appears");
     let br = resolve(&user, "br").expect("br still resolves");
     assert!(br.linux.is_some(), "the seeded command survives");
     assert_eq!(
@@ -190,7 +203,7 @@ fn add_trigger_on_user_alias_is_idempotent() {
 fn add_trigger_edits_a_seeded_alias_in_place() {
     let mut user = defaults();
     assert!(add_trigger(&mut user, "br", "b").unwrap());
-    assert_eq!(user.len(), 2, "no duplicate definition appears");
+    assert_eq!(user.len(), 3, "no duplicate definition appears");
     let br = resolve(&user, "br").expect("br still resolves");
     assert_eq!(br.name, "br");
     assert_eq!(br.triggers, vec!["b".to_string()]);
@@ -201,7 +214,7 @@ fn add_trigger_edits_a_seeded_alias_in_place() {
     );
     // Already there: no duplicate, no second entry.
     assert!(!add_trigger(&mut user, "br", "B").unwrap());
-    assert_eq!(user.len(), 2);
+    assert_eq!(user.len(), 3);
     assert_eq!(
         resolve(&user, "br").unwrap().triggers,
         vec!["b".to_string()]
@@ -220,7 +233,7 @@ fn add_trigger_rejects_a_word_taken_by_another_alias() {
         let err = add_trigger(&mut user, "u", taken).unwrap_err();
         assert!(err.contains("already used"), "{err}");
     }
-    assert!(user[3].triggers.is_empty(), "nothing was appended");
+    assert!(user[4].triggers.is_empty(), "nothing was appended");
 }
 
 #[test]
@@ -233,9 +246,9 @@ fn remove_trigger_reports_when_nothing_was_removed() {
         remove_trigger(&mut user, "t", "TT").unwrap(),
         "case-insensitive"
     );
-    assert_eq!(user[2].triggers, vec!["t2".to_string()], "one match goes");
+    assert_eq!(user[3].triggers, vec!["t2".to_string()], "one match goes");
     assert!(remove_trigger(&mut user, "t", "t2").unwrap());
-    assert!(user[2].triggers.is_empty());
+    assert!(user[3].triggers.is_empty());
     // Unknown trigger, unknown alias, and a seeded alias without that
     // trigger all report "nothing removed" instead of an error.
     assert!(!remove_trigger(&mut user, "t", "tt").unwrap());

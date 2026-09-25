@@ -5,9 +5,11 @@ The table maps a CJK character to the first letters of every pinyin reading
 it has (heteronyms included), so `apps` can match a name by its initials
 acronym: 文件管理器 (wen jian guan li qi) -> wjglq.
 
-Coverage: every character GB2312 can encode (levels 1 and 2), i.e. the set a
-Chinese desktop application name is realistically written with, plus a small
-extra list. Generated once and committed; runtime has no pinyin dependency.
+Coverage: every CJK Unified Ideograph, so traditional forms keep their
+characters instead of vanishing and leaving an accidental acronym behind.
+Readings are the most common one per character plus the hand-checked
+heteronyms in HETERONYMS. Generated once and committed; runtime has no pinyin
+dependency.
 
 Usage:
     python3 -m pip install pypinyin      # only needed to regenerate
@@ -19,6 +21,31 @@ import sys
 
 MAX_READINGS = 3
 LETTERS = [chr(ord("a") + i) for i in range(26)]
+# CJK Unified Ideographs: what a Chinese application name is written with,
+# traditional forms included (a zh_TW name must not lose characters and spell
+# an accidental acronym out of the leftovers).
+RANGE = range(0x4E00, 0xA000)
+# Readings a character keeps besides its most common one. Only heteronyms
+# that a name actually uses belong here: 乐 is le (音乐) *and* yue, 重 is
+# zhong (重庆) *and* chong, and taking every reading a dictionary knows would
+# hand half the machine an acronym it never had.
+HETERONYMS = {
+    "乐": "y",  # yue: 音乐, 乐器
+    "了": "l",  # le: 为了 (same letter, kept for completeness)
+    "传": "z",  # zhuan: 传记, 水浒传
+    "会": "k",  # kuai: 会计
+    "单": "s",  # shan: 单县
+    "号": "h",  # hao: 号码 (same letter)
+    "啕": "t",
+    "囵": "l",
+    "复": "f",  # fu: 复杂 (same letter)
+    "藏": "z",  # zang: 西藏, 藏族
+    "行": "h",  # hang: 银行, 行业
+    "长": "z",  # zhang: 成长, 队长
+    "率": "s",  # shuai: 率领
+    "系": "j",  # ji: 系鞋带
+    "重": "c",  # chong: 重庆, 重复
+}
 
 HEADER = """\
 //! Pinyin initial letters per hanzi, grouped by letter.
@@ -30,30 +57,19 @@ HEADER = """\
 """
 
 
-def gb2312_chars():
-    """Every character GB2312 encodes (levels 1 and 2)."""
-    chars = []
-    for high in range(0xA1, 0xFF):
-        for low in range(0xA1, 0xFF):
-            try:
-                chars.append(bytes([high, low]).decode("gb2312"))
-            except UnicodeDecodeError:
-                pass
-    return chars
+def cjk_chars():
+    """Every CJK Unified Ideograph, assigned or not (unassigned spell nothing)."""
+    return [chr(code) for code in RANGE]
 
 
 def readings(ch, pypinyin):
     """Pinyin initial letters of `ch`, most common reading first."""
     style = pypinyin.Style.FIRST_LETTER
-    default = pypinyin.pinyin(ch, style=style)[0][0].lower()
-    every = []
-    for group in pypinyin.pinyin(ch, heteronym=True, style=style):
-        for reading in group:
-            letter = reading.lower()
-            if letter in LETTERS and letter not in every:
-                every.append(letter)
-    if default in LETTERS:
-        every = [default] + [l for l in every if l != default]
+    letter = pypinyin.pinyin(ch, style=style)[0][0].lower()
+    every = [letter] if letter in LETTERS else []
+    for extra in HETERONYMS.get(ch, ""):
+        if extra not in every:
+            every.append(extra)
     return every[:MAX_READINGS]
 
 
@@ -77,7 +93,7 @@ def render(table):
     lines = [HEADER, "pub(super) const GROUPS: &[(char, &str)] = &["]
     for letter in LETTERS:
         chars = "".join(table[letter])
-        parts = chunk(chars, 76)
+        parts = chunk(chars, 110) or [""]
         lines.append("    ('%s', concat!(" % (letter,))
         for i, part in enumerate(parts):
             comma = "" if i == len(parts) - 1 else ","
@@ -94,7 +110,7 @@ def main():
     except ImportError:
         sys.exit("gen-pinyin: pypinyin is missing; python3 -m pip install pypinyin")
 
-    chars = gb2312_chars()
+    chars = cjk_chars()
     table, skipped = groups(chars, pypinyin)
     if skipped:
         print("gen-pinyin: no reading for %d chars: %s" % (len(skipped), "".join(skipped)))

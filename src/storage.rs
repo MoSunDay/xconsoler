@@ -18,13 +18,15 @@ pub const MAX_HISTORY: usize = 100;
 
 /// Current on-disk schema version.
 ///
-/// Version 3 renamed the alias JSON keys to the UI vocabulary (`"triggers"`
-/// for the trigger words, `"shortcuts"` for the key → value map); the manual
-/// `AliasDef` deserializer normalizes legacy keys while loading. Version 2
-/// was the first full snapshot: stores older than 2 carry *overrides* of
-/// the seeded defaults only, so [`load`] merges the defaults back in for
-/// them; any store older than this constant is bumped to it.
-pub const SCHEMA_VERSION: u32 = 3;
+/// Version 4 seeded the `app` alias (native application launcher), which
+/// older snapshots get appended by [`migrate`]. Version 3 renamed the alias
+/// JSON keys to the UI vocabulary (`"triggers"` for the trigger words,
+/// `"shortcuts"` for the key → value map); the manual `AliasDef`
+/// deserializer normalizes legacy keys while loading. Version 2 was the
+/// first full snapshot: stores older than 2 carry *overrides* of the seeded
+/// defaults only, so [`load`] merges the defaults back in for them; any
+/// store older than this constant is bumped to it.
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// One recorded execution. The input is stored base64-encoded so arbitrary
 /// text (quotes, newlines, unicode) survives the JSON roundtrip untouched.
@@ -253,15 +255,31 @@ fn read_fallback(path: &Path, legacy: Option<&Path>) -> Store {
 }
 
 /// Shared version migration: stores older than version 2 hold only overrides
-/// of the seeded defaults, so the defaults are merged back in first; every
-/// older version is then bumped to [`SCHEMA_VERSION`]. The alias deserializer
-/// has already normalized legacy field names in memory.
+/// of the seeded defaults, so the defaults are merged back in first; version 4
+/// seeded a new `app` alias, so older snapshots get it appended unless they
+/// already define that name; every older version is then bumped to
+/// [`SCHEMA_VERSION`]. The alias deserializer has already normalized legacy
+/// field names in memory.
 fn migrate(store: &mut Store) {
     if store.version < 2 {
         store.aliases = merge_defaults(std::mem::take(&mut store.aliases));
     }
+    if store.version < 4 {
+        append_default_alias(&mut store.aliases, crate::launch::default_def());
+    }
     if store.version < SCHEMA_VERSION {
         store.version = SCHEMA_VERSION;
+    }
+}
+
+/// Backfill one newly seeded default (named `def`) into an old store unless an
+/// alias of that name already exists; existing definitions are never touched.
+fn append_default_alias(aliases: &mut Vec<AliasDef>, def: AliasDef) {
+    let taken = aliases
+        .iter()
+        .any(|d| d.name.eq_ignore_ascii_case(&def.name));
+    if !taken {
+        aliases.push(def);
     }
 }
 

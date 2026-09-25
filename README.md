@@ -22,6 +22,7 @@ xconsoler --store ~/x.json
 xconsoler --summon                         # shell-keybind mode (see SSH section)
 xconsoler --print-bind [--shell zsh]       # emit the shell binding line
 xconsoler --print-rows                     # print bar height in rows (used by scripts/xc-bar)
+xconsoler --print-app 微信                  # print the app `app 微信` would launch
 xconsoler --set-wake-key alt+j             # change + persist the wake key
 xconsoler -h | --help                      # usage
 ```
@@ -109,9 +110,10 @@ hotkey below.
 |-------|----------------------------------------------|-------------------|----------------------|
 | `br`  | `xdg-open {input} >/dev/null 2>&1 &`         | `open {input} >/dev/null 2>&1 &` | `baidu` -> `https://www.baidu.com`, `gm` -> `https://mail.google.com` |
 | `cd`  | `@native clipboard` (native Rust backend)    | `@native clipboard` | -             |
+| `app` | `@native app` (installed applications)       | `@native app`       | -             |
 
-Every fresh store seeds exactly `br` and `cd`, concrete content included - the
-command templates above *and* the shortcuts - so `br baidu` works on a machine
+Every fresh store seeds exactly `br`, `cd` and `app`, concrete content included
+- the command templates above *and* the shortcuts - so `br baidu` works on a machine
 with no store copy yet. They are ordinary store entries: edit or delete them
 on the settings page (or with `:del`), and bring them back with `:add`. Add
 more with `:arg` or the settings page.
@@ -151,6 +153,16 @@ decoded text on the clipboard (plain text that is not valid base64 is copied
 verbatim). History keeps the input as recorded — the base64 text — so the
 history row shows the stored form and a replay decodes it again the same way.
 Override it with `:add cd <cmd> // <cmd>` if you prefer your own tool.
+
+The seeded `app` alias launches an installed application by name. It matches
+the entries the desktop menu would show - the XDG data dirs, plus flatpak and
+snap - by id, display name (and this locale's translation), the keywords the
+entry carries, the executable's base name, and the pinyin initials of a
+Chinese name, so `app xx` reaches 小小备忘录 (`xiaoxiao beiwanglu`) and `app wx`
+reaches 微信. The name a single entry answers to launches it; when several
+entries match, the bar lists them and launches nothing, so it never guesses
+between two apps. On macOS the same alias hands the name to `open`, and an
+input that looks like a URL passes through to the default browser.
 
 Placeholders:
 

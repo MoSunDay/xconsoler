@@ -209,8 +209,8 @@ fn long_commands_are_truncated_to_keep_the_table_readable() {
 fn expanded_alias_lists_trigger_rows() {
     let (_store, aliases) = t_store();
     let mut st = settings::new();
-    st.cursor = 2;
-    st.expanded = Some(2);
+    st.cursor = 3;
+    st.expanded = Some(3);
     let text = draw_once(&st, &aliases);
     assert!(text.contains("↳ trigger: tt"));
 }
@@ -219,8 +219,8 @@ fn expanded_alias_lists_trigger_rows() {
 fn expanded_alias_shows_indented_shortcuts() {
     let (_store, aliases) = t_store();
     let mut st = settings::new();
-    st.cursor = 2;
-    st.expanded = Some(2);
+    st.cursor = 3;
+    st.expanded = Some(3);
     let text = draw_once(&st, &aliases);
     assert!(text.contains("baidu → https://www.baidu.com"));
 }

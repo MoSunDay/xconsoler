@@ -143,10 +143,12 @@ impl<'de> Deserialize<'de> for AliasDef {
     }
 }
 
-/// Initial aliases seeded into every fresh store: exactly `br` and `cd`, each
-/// carrying its concrete content - the command templates *and* the registered
-/// shortcuts - so a fresh machine gets a working `br baidu` without any store
-/// copy.
+/// Initial aliases seeded into every fresh store: exactly `br`, `cd` and
+/// `app`, each carrying its concrete content - the command templates *and*
+/// the registered shortcuts - so a fresh machine gets a working `br baidu`
+/// without any store copy. `app` is the native launcher for installed
+/// applications (`crate::launch::default_def`); it stores the template, not a
+/// snapshot of the machine's app list.
 pub fn defaults() -> Vec<AliasDef> {
     vec![
         AliasDef {
@@ -172,6 +174,7 @@ pub fn defaults() -> Vec<AliasDef> {
             macos: Some(crate::clipboard::TEMPLATE.to_string()),
             shortcuts: BTreeMap::new(),
         },
+        crate::launch::default_def(),
     ]
 }
 
