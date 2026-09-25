@@ -13,6 +13,7 @@ use std::path::Path;
 use crossterm::event::KeyEvent;
 
 use crate::alias;
+use crate::platform;
 use crate::settings::{self, Effect};
 use crate::state::{App, Mode};
 use crate::storage::{self, Store};
@@ -53,13 +54,16 @@ pub fn apply_effect(store: &mut Store, effect: &Effect) -> Option<Result<String,
                 Err(e) => Err(e),
             },
         ),
-        Effect::SetCommands {
+        Effect::SetCommand {
             alias,
-            linux,
-            macos,
+            platform,
+            command,
         } => Some(
-            match alias::set_commands(&mut store.aliases, alias, linux, macos) {
-                Ok(()) => Ok(format!("commands updated: {alias}")),
+            match alias::set_command(&mut store.aliases, alias, *platform, command) {
+                Ok(()) => Ok(format!(
+                    "command updated: {alias} ({})",
+                    platform::name(*platform)
+                )),
                 Err(e) => Err(e),
             },
         ),
@@ -126,7 +130,7 @@ pub fn apply(app: &mut App, key: KeyEvent, path: &Path) {
         | Effect::SetShortcut { .. }
         | Effect::AddTrigger { .. }
         | Effect::RemoveTrigger { .. }
-        | Effect::SetCommands { .. }
+        | Effect::SetCommand { .. }
         | Effect::EditShortcut { .. }
         | Effect::RenameTrigger { .. } => app.mode = Mode::Settings(Box::new(st)),
     }
@@ -135,6 +139,7 @@ pub fn apply(app: &mut App, key: KeyEvent, path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::Platform;
     use crate::settings::Settings;
     use crate::state;
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -150,12 +155,17 @@ mod tests {
 
     /// App on the settings page, cursor on the first stored alias (`br`).
     fn setup() -> (App, TempDir, std::path::PathBuf) {
+        setup_on(Platform::Linux)
+    }
+
+    /// Same page opened for an explicit platform.
+    fn setup_on(platform: Platform) -> (App, TempDir, std::path::PathBuf) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("store.json");
         let mut app = state::new(Store::default(), false);
         app.mode = Mode::Settings(Box::new(Settings {
             cursor: 0,
-            ..settings::new()
+            ..settings::new_for(platform)
         }));
         (app, dir, path)
     }
@@ -259,44 +269,61 @@ mod tests {
     }
 
     #[test]
-    fn edit_wizard_can_rewrite_both_commands() {
+    fn edit_wizard_rewrites_only_the_current_platform_command() {
         let (mut app, _dir, path) = setup();
+        let macos_before = app.store.aliases[0].macos.clone();
         apply(&mut app, key(KeyCode::Char('e')), &path);
         assert!(form_open(&app));
         apply(&mut app, ctrl('u'), &path); // clear the prefilled linux
         type_str(&mut app, "echo {input}", &path);
-        apply(&mut app, key(KeyCode::Enter), &path); // accept -> step 2
-        apply(&mut app, ctrl('u'), &path); // clear the prefilled macos
-        type_str(&mut app, "open {input}", &path);
-        apply(&mut app, key(KeyCode::Enter), &path);
+        apply(&mut app, key(KeyCode::Enter), &path); // single step: submits
 
         let def = app.store.aliases.first().expect("br is seeded");
         assert_eq!(def.linux.as_deref(), Some("echo {input}"));
-        assert_eq!(def.macos.as_deref(), Some("open {input}"));
-        assert!(status(&app).is_some_and(|(ok, m)| ok && m.contains("commands updated")));
+        assert_eq!(
+            def.macos, macos_before,
+            "the macos command is left byte-identical"
+        );
+        assert!(
+            status(&app).is_some_and(|(ok, m)| ok && m.contains("command updated: br (linux)")),
+            "the status names the platform: {:?}",
+            status(&app)
+        );
 
         let reloaded = storage::load(&path);
         assert_eq!(reloaded.aliases[0].linux.as_deref(), Some("echo {input}"));
-        assert_eq!(reloaded.aliases[0].macos.as_deref(), Some("open {input}"));
+        assert_eq!(reloaded.aliases[0].macos, macos_before);
     }
 
     #[test]
-    fn edit_wizard_blank_macos_mirrors_linux() {
-        let (mut app, _dir, path) = setup();
+    fn edit_wizard_on_macos_preserves_the_linux_command() {
+        // This test runs on Linux CI too: it drives the macOS branch.
+        let (mut app, _dir, path) = setup_on(Platform::Macos);
+        let linux_before = app.store.aliases[0].linux.clone();
         apply(&mut app, key(KeyCode::Char('e')), &path);
-        apply(&mut app, ctrl('u'), &path);
-        type_str(&mut app, "printf %s {input}", &path);
-        apply(&mut app, key(KeyCode::Enter), &path);
-        apply(&mut app, ctrl('u'), &path); // blank macos step
+        assert!(form_open(&app));
+        apply(&mut app, ctrl('u'), &path); // clear the prefilled macos
+        type_str(&mut app, "open -a Safari {input}", &path);
         apply(&mut app, key(KeyCode::Enter), &path);
 
         let def = app.store.aliases.first().expect("br is seeded");
-        assert_eq!(def.linux.as_deref(), Some("printf %s {input}"));
+        assert_eq!(def.macos.as_deref(), Some("open -a Safari {input}"));
         assert_eq!(
-            def.macos.as_deref(),
-            Some("printf %s {input}"),
-            "blank macos mirrors linux (alias::set_commands)"
+            def.linux, linux_before,
+            "the linux command is left byte-identical"
         );
+        assert!(
+            status(&app).is_some_and(|(ok, m)| ok && m.contains("command updated: br (macos)")),
+            "the status names the platform: {:?}",
+            status(&app)
+        );
+
+        let reloaded = storage::load(&path);
+        assert_eq!(
+            reloaded.aliases[0].macos.as_deref(),
+            Some("open -a Safari {input}")
+        );
+        assert_eq!(reloaded.aliases[0].linux, linux_before);
     }
 
     #[test]
@@ -360,14 +387,14 @@ mod tests {
     }
 
     #[test]
-    fn set_commands_on_an_unknown_alias_reports_an_error() {
+    fn set_command_on_an_unknown_alias_reports_an_error() {
         let mut store = Store::default();
         let out = apply_effect(
             &mut store,
-            &Effect::SetCommands {
+            &Effect::SetCommand {
                 alias: "nope".to_string(),
-                linux: "echo".to_string(),
-                macos: String::new(),
+                platform: Platform::Linux,
+                command: "echo".to_string(),
             },
         );
         assert!(out.unwrap().is_err());

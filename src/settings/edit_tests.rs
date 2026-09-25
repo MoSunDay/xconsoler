@@ -3,6 +3,7 @@
 //! Split out of `settings/list_tests.rs` to keep both files small.
 
 use super::*;
+use crate::platform::Platform;
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -44,7 +45,7 @@ fn on_t() -> (Settings, Store) {
 }
 
 #[test]
-fn e_opens_the_edit_wizard_prefilled_with_both_commands() {
+fn e_opens_the_single_step_editor_prefilled_with_the_platform_command() {
     let (st, store) = on_t();
     let (st, _, eff) = handle_key(&st, &store, key(KeyCode::Char('e')));
     assert_eq!(eff, Effect::None);
@@ -52,31 +53,62 @@ fn e_opens_the_edit_wizard_prefilled_with_both_commands() {
     assert_eq!(
         form.purpose,
         settings_form::Purpose::EditCommand {
-            alias: "t".to_string()
+            alias: "t".to_string(),
+            platform: Platform::Linux,
         }
     );
-    assert_eq!(form.input, "printf %s {input}", "linux step prefilled");
-    assert_eq!(form.macos, "", "t has no macos command");
-    assert_eq!(settings_form::step_count(&form), 2);
+    assert_eq!(form.input, "printf %s {input}", "linux command prefilled");
+    assert_eq!(form.command, "printf %s {input}");
+    assert_eq!(settings_form::step_count(&form), 1);
 }
 
 #[test]
-fn edit_wizard_accepts_prefilled_text_and_mirrors_blank_macos() {
+fn edit_wizard_accepts_the_prefilled_text() {
     let (st, store) = on_t();
     let (st, _, _) = handle_key(&st, &store, key(KeyCode::Char('e')));
-    // Enter accepts the prefilled linux step, Enter the (empty) macos one
-    let (st, _, _) = handle_key(&st, &store, key(KeyCode::Enter));
+    // Enter accepts the prefilled command; the single step submits at once.
     let (st, _, eff) = handle_key(&st, &store, key(KeyCode::Enter));
-    assert_eq!(st.form, None);
+    assert_eq!(st.form, None, "the wizard closes on submit");
     assert_eq!(
         eff,
-        Effect::SetCommands {
+        Effect::SetCommand {
             alias: "t".to_string(),
-            linux: "printf %s {input}".to_string(),
-            macos: String::new(),
+            platform: Platform::Linux,
+            command: "printf %s {input}".to_string(),
         },
-        "a blank macos answer mirrors linux in alias::set_commands"
+        "only the page's platform travels in the effect"
     );
+}
+
+#[test]
+fn macos_page_opens_a_macos_only_single_step_editor() {
+    let store = store_with_t(); // t stores a linux command only
+    let st = Settings {
+        cursor: 2,
+        platform: Platform::Macos,
+        ..new_for(Platform::Macos)
+    };
+    let (st, _, eff) = handle_key(&st, &store, key(KeyCode::Char('e')));
+    assert_eq!(eff, Effect::None);
+    {
+        let form = st.form.as_ref().expect("edit wizard open");
+        assert_eq!(
+            form.purpose,
+            settings_form::Purpose::EditCommand {
+                alias: "t".to_string(),
+                platform: Platform::Macos,
+            }
+        );
+        assert_eq!(form.input, "", "t has no macos command to prefill");
+        assert_eq!(settings_form::step_count(form), 1, "single-step editor");
+    }
+    // An empty macos command is refused, and the message names the platform.
+    let (st, _, eff) = handle_key(&st, &store, key(KeyCode::Enter));
+    assert_eq!(eff, Effect::None);
+    {
+        let form = st.form.as_ref().expect("still on the editor");
+        assert_eq!(form.error.as_deref(), Some("macos command cannot be empty"));
+    }
 }
 
 /// Expand `t` and park the cursor on its `idx`-th entry row (0 = the trigger,

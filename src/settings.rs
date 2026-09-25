@@ -11,6 +11,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::alias::{self, AliasDef};
+use crate::platform::{self, Platform};
 use crate::settings_form::{self, Form, FormOutcome, Submission};
 use crate::storage::Store;
 
@@ -37,11 +38,12 @@ pub enum Effect {
     AddTrigger { alias: String, trigger: String },
     /// Drop a trigger word (`alias::remove_trigger`).
     RemoveTrigger { alias: String, trigger: String },
-    /// Rewrite both commands of an alias (`alias::set_commands`).
-    SetCommands {
+    /// Rewrite the selected platform's command (`alias::set_command`); the
+    /// other platform's stored command is never touched.
+    SetCommand {
         alias: String,
-        linux: String,
-        macos: String,
+        platform: Platform,
+        command: String,
     },
     /// Rewrite one concrete shortcut, key included (`alias::edit_shortcut`).
     EditShortcut {
@@ -86,15 +88,25 @@ pub struct Settings {
     pub expanded: Option<usize>,
     /// Transient message `(ok?, text)` shown above the key hints.
     pub status: Option<(bool, String)>,
+    /// Platform the page edits: only this platform's commands are shown by
+    /// the table and offered by the wizards.
+    pub platform: Platform,
 }
 
-/// Fresh list state: cursor on the first alias, nothing expanded.
+/// Fresh list state for the detected platform: cursor on the first alias,
+/// nothing expanded.
 pub fn new() -> Settings {
+    new_for(platform::current())
+}
+
+/// Fresh list state for an explicit platform (tests force the "other" one).
+pub fn new_for(platform: Platform) -> Settings {
     Settings {
         form: None,
         cursor: 0,
         expanded: None,
         status: None,
+        platform,
     }
 }
 
@@ -151,6 +163,7 @@ fn list_key(st: &Settings, store: &Store, key: KeyEvent) -> (Settings, Store, Ef
         cursor: st.cursor,
         expanded: st.expanded,
         status: None,
+        platform: st.platform,
     };
     let mut store = store.clone();
     let mut effect = Effect::None;
@@ -168,7 +181,7 @@ fn list_key(st: &Settings, store: &Store, key: KeyEvent) -> (Settings, Store, Ef
         KeyCode::Enter | KeyCode::Right => next.expanded = toggle(&cur_rows, st),
         // ← is a pure collapse: it never opens a different alias by accident.
         KeyCode::Left => next.expanded = None,
-        KeyCode::Char('n') if !ctrl => next.form = Some(settings_form::new_alias()),
+        KeyCode::Char('n') if !ctrl => next.form = Some(settings_form::new_alias(st.platform)),
         KeyCode::Char('s') if !ctrl => {
             next.form = selected_alias(&cur_rows, st, &aliases)
                 .map(|name| settings_form::new_shortcut(&name))
@@ -218,9 +231,9 @@ fn selected_def<'a>(rows: &[Row], st: &Settings, aliases: &'a [AliasDef]) -> Opt
     aliases.get(idx)
 }
 
-/// `e`: the wizard matching the selected row — an alias row edits both
-/// commands (the classic path), a shortcut row that key/value pair (key and
-/// value prefilled), a trigger row that word. `None` when nothing valid is
+/// `e`: the wizard matching the selected row — an alias row edits that
+/// platform's command, a shortcut row that key/value pair (key and value
+/// prefilled), a trigger row that word. `None` when nothing valid is
 /// selected.
 fn edit_form(rows: &[Row], st: &Settings, aliases: &[AliasDef]) -> Option<Form> {
     let def = selected_def(rows, st, aliases)?;
@@ -235,8 +248,8 @@ fn edit_form(rows: &[Row], st: &Settings, aliases: &[AliasDef]) -> Option<Form> 
             .map(|trigger| settings_form::new_edit_trigger(&def.name, trigger)),
         Row::Alias { .. } => Some(settings_form::new_edit_command(
             &def.name,
-            def.linux.as_deref(),
-            def.macos.as_deref(),
+            st.platform,
+            alias::platform_command(def, st.platform),
         )),
     }
 }
@@ -328,6 +341,7 @@ fn form_key(st: &Settings, form: &Form, store: &Store, key: KeyEvent) -> (Settin
         cursor: st.cursor,
         expanded: st.expanded,
         status,
+        platform: st.platform,
     };
     match outcome {
         FormOutcome::Active => (
@@ -358,14 +372,14 @@ fn effect_of(sub: Submission) -> Effect {
         Submission::Alias(def) => Effect::AddAlias(def),
         Submission::Shortcut { alias, key, value } => Effect::SetShortcut { alias, key, value },
         Submission::Trigger { alias, trigger } => Effect::AddTrigger { alias, trigger },
-        Submission::Commands {
+        Submission::Command {
             alias,
-            linux,
-            macos,
-        } => Effect::SetCommands {
+            platform,
+            command,
+        } => Effect::SetCommand {
             alias,
-            linux,
-            macos,
+            platform,
+            command,
         },
         Submission::EditShortcut {
             alias,

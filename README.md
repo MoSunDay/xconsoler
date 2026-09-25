@@ -158,10 +158,11 @@ Placeholders:
 * `@stdin` — your input is piped to the command's **stdin** instead.
 
 Both platforms are first class: omitting `// <macos-cmd>` mirrors the linux
-command (same rule the settings wizard uses), and at run time a command that
-is missing or blank on the current platform falls back to the other
-platform's command. Only when *both* are missing does the run fail with
-`no command configured for <platform>`.
+command (the same both-platform behavior `:add` has always had — the
+`/settings` wizard instead stores only the current platform's command), and
+at run time a command that is missing or blank on the current platform falls
+back to the other platform's command. Only when *both* are missing does the
+run fail with `no command configured for <platform>`.
 
 Runs go through `sh -c`, and only a run that actually worked is remembered: a
 non-zero exit, a signal, a spawn failure or a missing command reports `✗ ...`
@@ -264,23 +265,30 @@ Type `/settings` and press Enter - or just `/s`, picked from the fuzzy list -
 for a full-screen alias manager (`Esc` or `q` returns to the bar;
 `Ctrl+C`/`Ctrl+D` quits):
 
-The table has one row per alias and five columns —
-`name | triggers | linux | macos | shortcuts` (missing commands show `—`,
-long commands are truncated with `…`):
+The table has one row per alias and four columns —
+`name | triggers | <platform> | shortcuts`, where the command column is named
+after the platform xconsoler runs on (`linux` on Linux, `macos` on a Mac).
+Only that platform's stored command is shown: `—` means none is stored for
+this platform (the run path still falls back to the other platform's
+command), long commands are truncated with `…`, and the other platform's
+field never appears on this page.
 
 * `↑`/`↓` (or `j`/`k`) move the selection, `Enter`/`→` expands an alias to
   show its triggers and shortcuts (triggers first, then shortcuts), `←`
   collapses.
 * `n` — wizard for a new alias: name → triggers (comma-separated, may be
-  empty) → linux command (use `{input}` where the input goes) → macos
-  command (empty = same as linux).
+  empty) → `<platform>` command (use `{input}` where the input goes).
+  Exactly one command is collected and stored; at run time the other
+  platform uses it as a fallback.
 * `s` — wizard for a new shortcut on the selected alias (or on the row of
   one of its triggers/shortcuts, which routes to that alias): key → value.
 * `t` — wizard for a new trigger on the selected alias.
 * `e` — edit the selected row in place, prefilled with its current value:
-  an alias's linux and macos commands, a shortcut's key and value, or a
+  an alias's `<platform>` command, a shortcut's key and value, or a
   trigger's word. `Ctrl+U` kills from the caret back to the start of a field
-  (`Ctrl+K` kills to the end) and a blank macos keeps mirroring linux.
+  (`Ctrl+K` kills to the end). Editing an alias changes only the current
+  platform's command; the other platform's stored command is left untouched
+  (hand-edit `store.json` to change it).
 * `d` — delete the selection: a shortcut row drops just that shortcut, a
   trigger row just that trigger, an alias row the whole alias, seeded ones
   included.
@@ -321,7 +329,9 @@ Every change is saved to `store.json` immediately.
   ```
   Hand-editing is supported; keep the top-level `"version": 3`, because a file
   without it counts as pre-v2 and gets the seeded defaults merged back in on
-  the next load.
+  the next load. `/settings` only ever reads and writes the running
+  platform's field, so the other platform's stored command stays exactly as
+  hand-edited.
 * Inputs are stored as **base64 of the plain text**, so quotes/unicode/newlines
   round-trip safely and nothing secret-looking is kept in cleartext. A `cd`
   run records the base64 text itself, so the history row shows the stored

@@ -3,6 +3,7 @@
 //! `e` edit-wizard coverage lives in `settings/edit_tests.rs`.
 
 use super::*;
+use crate::platform::Platform;
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -160,6 +161,32 @@ fn a_is_no_longer_bound_on_the_list() {
     let (st, store) = on_t();
     let (st, _, eff) = handle_key(&st, &store, key(KeyCode::Char('a')));
     assert_eq!((st.form, eff), (None, Effect::None));
+}
+
+#[test]
+fn n_opens_the_alias_wizard_for_the_page_platform() {
+    let (st, store) = on_t();
+    let (st, _, eff) = handle_key(&st, &store, key(KeyCode::Char('n')));
+    assert_eq!(eff, Effect::None);
+    let form = st.form.as_ref().expect("new-alias wizard open");
+    assert_eq!(
+        form.purpose,
+        settings_form::Purpose::NewAlias(Platform::Linux)
+    );
+    assert_eq!(settings_form::step_count(form), 3);
+
+    // The same key on a macOS page opens the macOS wizard.
+    let mac = Settings {
+        platform: Platform::Macos,
+        ..new_for(Platform::Macos)
+    };
+    let (st, _, effect) = handle_key(&mac, &store, key(KeyCode::Char('n')));
+    assert_eq!(effect, Effect::None);
+    let form = st.form.as_ref().expect("new-alias wizard open");
+    assert_eq!(
+        form.purpose,
+        settings_form::Purpose::NewAlias(Platform::Macos)
+    );
 }
 
 #[test]

@@ -5,6 +5,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::*;
+use crate::platform::Platform;
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -39,7 +40,7 @@ fn empty_store() -> Store {
 #[test]
 fn insert_and_delete_work_around_a_middle_caret() {
     let store = empty_store();
-    let f = type_str(&new_alias(), "ac", &store);
+    let f = type_str(&new_alias(Platform::Linux), "ac", &store);
     let (f, _) = handle_key(&f, &store, key(KeyCode::Left));
     assert_eq!((f.input.as_str(), f.caret), ("ac", 1));
     let f = type_str(&f, "b", &store);
@@ -65,7 +66,7 @@ fn insert_and_delete_work_around_a_middle_caret() {
 #[test]
 fn caret_motions_move_without_changing_the_text() {
     let store = empty_store();
-    let f = type_str(&new_alias(), "git commit", &store);
+    let f = type_str(&new_alias(Platform::Linux), "git commit", &store);
     assert_eq!(f.caret, 10, "typing leaves the caret at the end");
 
     let (f, _) = handle_key(&f, &store, ctrl('a'));
@@ -97,7 +98,7 @@ fn caret_motions_move_without_changing_the_text() {
 #[test]
 fn word_motions_use_ctrl_arrows_and_alt_b_f() {
     let store = empty_store();
-    let f = type_str(&new_alias(), "git commit -m", &store);
+    let f = type_str(&new_alias(Platform::Linux), "git commit -m", &store);
     let (f, _) = handle_key(&f, &store, ctrl('a'));
 
     let (f, _) = handle_key(&f, &store, alt('f'));
@@ -127,7 +128,7 @@ fn word_motions_use_ctrl_arrows_and_alt_b_f() {
 #[test]
 fn kill_keys_cut_around_the_caret() {
     let store = empty_store();
-    let f = type_str(&new_alias(), "git commit foo", &store);
+    let f = type_str(&new_alias(Platform::Linux), "git commit foo", &store);
     let (f, _) = handle_key(&f, &store, alt('b'));
     assert_eq!((f.input.as_str(), f.caret), ("git commit foo", 11));
 
@@ -166,7 +167,7 @@ fn kill_keys_cut_around_the_caret() {
 #[test]
 fn ctrl_t_transposes_around_the_caret() {
     let store = empty_store();
-    let f = type_str(&new_alias(), "ab", &store);
+    let f = type_str(&new_alias(Platform::Linux), "ab", &store);
     let (f, _) = handle_key(&f, &store, ctrl('t'));
     assert_eq!(
         (f.input.as_str(), f.caret),
@@ -195,9 +196,9 @@ fn ctrl_t_transposes_around_the_caret() {
 fn ctrl_d_quits_and_delete_deletes_forward() {
     let store = empty_store();
     // Ctrl+D quits with or without text; it never edits.
-    let (_, out) = handle_key(&new_alias(), &store, ctrl('d'));
+    let (_, out) = handle_key(&new_alias(Platform::Linux), &store, ctrl('d'));
     assert_eq!(out, FormOutcome::Quit, "Ctrl+D quits on an empty line");
-    let f = type_str(&new_alias(), "ab", &store);
+    let f = type_str(&new_alias(Platform::Linux), "ab", &store);
     let (f, out) = handle_key(&f, &store, ctrl('d'));
     assert_eq!(out, FormOutcome::Quit, "Ctrl+D quits with text too");
     assert_eq!(
@@ -207,7 +208,7 @@ fn ctrl_d_quits_and_delete_deletes_forward() {
     );
 
     // Delete still eats the char under the caret.
-    let f = type_str(&new_alias(), "ab", &store);
+    let f = type_str(&new_alias(Platform::Linux), "ab", &store);
     let (f, _) = handle_key(&f, &store, key(KeyCode::Home));
     let (f, out) = handle_key(&f, &store, key(KeyCode::Delete));
     assert_eq!(out, FormOutcome::Active);
@@ -220,16 +221,13 @@ fn ctrl_d_quits_and_delete_deletes_forward() {
 #[test]
 fn prefill_and_advance_leave_the_caret_at_the_end() {
     let store = empty_store();
-    let f = new_edit_command("t", Some("printf %s {input}"), Some("open {input}"));
+    let f = new_edit_command("t", Platform::Linux, Some("printf %s {input}"));
     assert_eq!(f.caret, f.input.chars().count());
-    assert_eq!(f.caret, 17, "prefilled linux command: caret at the end");
-
-    // the second edit-command step is prefilled too
-    let (f, _) = enter(&f, &store);
-    assert_eq!((f.input.as_str(), f.caret), ("open {input}", 12));
+    assert_eq!(f.caret, 17, "prefilled command: caret at the end");
+    assert_eq!(f.command, "printf %s {input}");
 
     // Enter trims the field and parks the caret at the end of what stays
-    let f = type_str(&new_alias(), " bad! ", &store);
+    let f = type_str(&new_alias(Platform::Linux), " bad! ", &store);
     let (f, out) = enter(&f, &store);
     assert_eq!(out, FormOutcome::Active, "invalid name stays on the step");
     assert_eq!((f.input.as_str(), f.caret), ("bad!", 4));
