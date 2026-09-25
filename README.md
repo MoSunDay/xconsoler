@@ -25,6 +25,12 @@ xconsoler --set-wake-key alt+j             # change + persist the wake key
 xconsoler -h | --help                      # usage
 ```
 
+Or install the tagged release straight from the repo, no checkout needed:
+
+```sh
+cargo install --git https://github.com/MoSunDay/xconsoler.git --tag v0.1.0 --locked
+```
+
 The bar is **visible on startup** — a fresh launch never looks like it
 exited immediately. Hide it with `Esc` and bring it back with the wake key
 whenever you like. Its terminal title is set to `xconsoler` (and cleared
