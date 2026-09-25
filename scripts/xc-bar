@@ -52,7 +52,8 @@ if [ ! -x "$XC_BIN" ]; then
 fi
 [ -x "$XC_BIN" ] || XC_BIN=/usr/local/bin/xconsoler
 
-STORE_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/xconsoler/store.json
+# Same default as the launcher (storage::default_path): $HOME/xconsoler/store.json.
+STORE_FILE=${HOME:-.}/xconsoler/store.json
 # One exec of the launcher itself beats python3 (~30ms saved on every
 # hotkey press); python3 stays as the fallback, where a missing/corrupt
 # store means the old 16-row default.
@@ -220,7 +221,11 @@ gt_ensure_profile() {
     # header comment; VTE would otherwise inherit the GTK theme colours, so
     # pin the launcher palette (#1f1f28 sumiInk0 / #dcdcdc fujiWhite, see
     # src/theme.rs) to keep light text readable on the translucent bar.
+    # The keyfile must start with the [/] group header: without it dconf
+    # fails with "Key file does not start with a group" (stderr is hidden)
+    # and the bar silently falls back to the default colours.
     dconf load "$PROF" 2>/dev/null <<KEYFILE || return 1
+[/]
 visible-name='xconsoler'
 use-transparent-background=true
 background-transparency-percent=$TRANS

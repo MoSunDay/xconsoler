@@ -1,7 +1,7 @@
-//! Visual theme, ported from terminator-rust's default builtin theme
-//! (Kanagawa Wave) for an opaque launcher bar.
+//! Visual theme, ported from terminator-rust's default theme (Kanagawa Wave)
+//! for an opaque launcher bar.
 //!
-//! Source of truth: terminator-rust `crates/theme/src/builtin.rs`
+//! Source of truth: terminator-rust's theme crate (`crates/theme/src/`),
 //! `kanagawa_wave()`. The bar is opaque: the host terminal profile paints the
 //! background (see `scripts/xc-bar`, which pins the same `#1f1f28`), so the
 //! launcher paints no backgrounds of its own and text, cursor and selection

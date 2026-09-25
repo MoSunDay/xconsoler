@@ -5,9 +5,10 @@
 //!
 //! `scripts/xc-bar` picks the *launch* geometry from the stored history, so
 //! the first frame is already right; this module keeps it right afterwards.
-//! Two mechanisms, both best effort and both fired at most once per height
-//! change (a terminal that ignores the request would otherwise get one per
-//! event-loop tick):
+//! Two mechanisms, both best effort, and a retry policy ([`may_ask`]) that
+//! covers a window which is still being mapped or focused - where the first
+//! request goes nowhere - without asking a terminal that ignores the request
+//! on every event-loop tick forever:
 //!
 //! * [`resize_escape`] - xterm's `CSI 8 ; rows ; cols t`. Honouring it is a
 //!   terminal policy: xterm needs `allowWindowOps`, kitty/wezterm/contour do
@@ -23,9 +24,13 @@
 //!   is allowed to touch it. If ownership cannot be proven, the fallback is
 //!   skipped; the escape above still runs.
 //!
-//! Only a summoned bar resizes anything: a plain `xconsoler` run is a guest
-//! in whatever terminal the user started it from. `XC_ROWS` (a pinned
-//! height) and `XC_NO_FIT` turn the whole thing off.
+//! Every run fits its window: a plain `xconsoler` shrinks the terminal it was
+//! started from, a summoned bar the window it owns, and the size the window had
+//! at startup comes back on the way out (the event loop keeps that baseline).
+//! `XC_ROWS` (a pinned height) and `XC_NO_FIT` turn the whole thing off; in a
+//! tmux pane the request takes the passthrough envelope ([`crate::fit_tmux`]).
+
+use std::time::Duration;
 
 use crate::commands;
 use crate::state::{self, App, Mode, Visibility};
@@ -36,6 +41,15 @@ use crate::state::{self, App, Mode, Visibility};
 /// ignores both mechanisms stops being asked after this many tries instead of
 /// once per tick forever.
 pub const MAX_TRIES: u8 = 3;
+
+/// Pace of the retries after [`MAX_TRIES`]: a window that is not mapped or
+/// focused yet answers within a second or two, while a terminal that never
+/// answers only costs one request every this often.
+pub const RETRY_AFTER: Duration = Duration::from_secs(2);
+
+/// Total asks spent on one height, quick tries included. Past this the fit
+/// gives up on that height until the candidate set wants a different one.
+pub const MAX_ASKS: u8 = 8;
 
 /// Rows the `/settings` page asks for. It is a form, not a bar, so it gets a
 /// fixed comfortable height instead of one derived from a candidate count.
@@ -54,19 +68,29 @@ pub fn desired_rows(app: &App) -> u16 {
         // A hidden bar is just the bare box; leave the window alone.
         return state::bar_rows(0);
     }
-    // While the palette is open it replaces the candidate list, so its
-    // commands are what need room.
+    // While the palette is open it replaces the candidate list, so the rows
+    // its current `:`/`/` query shows are what need room.
     let items = match app.palette {
-        Some(_) => commands::len(),
+        Some(_) => commands::palette_items(&app.input).len(),
         None => state::candidates(app).len(),
     };
     state::bar_rows(items)
 }
 
-/// Whether this run may resize its own window: summoned (it owns that
-/// window), no `XC_ROWS` pin to respect, and not opted out via `XC_NO_FIT`.
-pub fn enabled(summon: bool, rows_pin: Option<&str>, no_fit: Option<&str>) -> bool {
-    summon && rows_pin.is_none_or(|v| v.trim().is_empty()) && !truthy(no_fit)
+/// Whether the fit may ask for its height again: `tries` asks went out, the
+/// last one `since` ago. The first [`MAX_TRIES`] go back to back (the terminal
+/// applies a request asynchronously), then [`RETRY_AFTER`] spaces them out
+/// until [`MAX_ASKS`] gives up on this height. Pure; the caller owns the
+/// counters.
+pub fn may_ask(tries: u8, since: Duration) -> bool {
+    tries < MAX_TRIES || (tries < MAX_ASKS && since >= RETRY_AFTER)
+}
+
+/// Whether this run may resize its own window: no `XC_ROWS` pin to respect
+/// and not opted out via `XC_NO_FIT`. A summoned bar and a plain run both fit;
+/// only the window they resize differs.
+pub fn enabled(rows_pin: Option<&str>, no_fit: Option<&str>) -> bool {
+    rows_pin.is_none_or(|v| v.trim().is_empty()) && !truthy(no_fit)
 }
 
 /// Whether the X11 fallback applies: `xdotool` on `PATH`, an X display, and
@@ -173,7 +197,7 @@ mod tests {
     }
 
     fn with_shortcuts() -> Vec<AliasDef> {
-        let mut def = alias::defaults().remove(0); // br (builtin)
+        let mut def = alias::defaults().remove(0); // br (seeded default)
         def.shortcuts.clear();
         def.shortcuts
             .insert("baidu".to_string(), "https://www.baidu.com".to_string());
@@ -217,6 +241,20 @@ mod tests {
     }
 
     #[test]
+    fn palette_height_follows_the_slash_query() {
+        let mut a = app(0);
+        a.palette = Some(0);
+        a.input = "/".to_string();
+        assert_eq!(desired_rows(&a), state::bar_rows(1), "only /settings");
+
+        a.input = "/zz".to_string();
+        assert_eq!(desired_rows(&a), 4, "no matches: the bare box");
+
+        a.palette = None;
+        assert_eq!(desired_rows(&a), 4, "closed palette: still the bare box");
+    }
+
+    #[test]
     fn hidden_bar_keeps_the_bare_box() {
         let mut a = app(3);
         a.visibility = Visibility::Hidden;
@@ -236,18 +274,37 @@ mod tests {
     }
 
     #[test]
-    fn only_an_unpinned_summoned_bar_may_resize() {
-        assert!(enabled(true, None, None));
-        assert!(!enabled(false, None, None), "a plain run is a guest");
-        assert!(!enabled(true, Some("9"), None), "XC_ROWS wins");
-        assert!(enabled(true, Some("  "), None), "an empty pin is no pin");
-        assert!(!enabled(true, None, Some("1")), "XC_NO_FIT=1");
-        assert!(!enabled(true, None, Some("yes")));
+    fn asks_are_spaced_after_the_quick_tries() {
+        assert!(may_ask(0, Duration::ZERO));
         assert!(
-            enabled(true, None, Some("0")),
-            "XC_NO_FIT=0 is not an opt-out"
+            may_ask(MAX_TRIES - 1, Duration::ZERO),
+            "quick tries are back to back"
         );
-        assert!(enabled(true, None, Some("")));
+        assert!(
+            !may_ask(MAX_TRIES, Duration::from_millis(1)),
+            "then they slow down"
+        );
+        assert!(
+            may_ask(MAX_TRIES, RETRY_AFTER),
+            "a window mapped late still answers"
+        );
+        assert!(may_ask(MAX_ASKS - 1, RETRY_AFTER));
+        assert!(
+            !may_ask(MAX_ASKS, RETRY_AFTER),
+            "a terminal that ignores us is done"
+        );
+        assert!(!may_ask(MAX_ASKS, Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn an_unpinned_bar_may_resize() {
+        assert!(enabled(None, None));
+        assert!(!enabled(Some("9"), None), "XC_ROWS wins");
+        assert!(enabled(Some("  "), None), "an empty pin is no pin");
+        assert!(!enabled(None, Some("1")), "XC_NO_FIT=1");
+        assert!(!enabled(None, Some("yes")));
+        assert!(enabled(None, Some("0")), "XC_NO_FIT=0 is not an opt-out");
+        assert!(enabled(None, Some("")));
     }
 
     #[test]

@@ -7,7 +7,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::alias::AliasDef;
-use crate::storage;
 
 /// Hard cap on entries imported in one run.
 pub const MAX_IMPORT: usize = 300;
@@ -233,29 +232,18 @@ fn host_of(url: &str) -> String {
     host.split(':').next().unwrap_or(host).to_string()
 }
 
-/// Merge `fresh` pairs into alias `target`, materialising a user-owned copy
-/// of a built-in first (same-name replacement keeping all of its content,
-/// `builtin = false`). Existing keys are left untouched; returns how many
-/// pairs were actually added. `Err` when `target` does not exist.
+/// Merge `fresh` pairs into alias `target` in `aliases`. Existing keys are
+/// left untouched; returns how many pairs were actually added. `Err` when
+/// `target` does not exist.
 pub fn merge_into(
-    user: &mut Vec<AliasDef>,
+    aliases: &mut [AliasDef],
     target: &str,
     fresh: &[(String, String)],
 ) -> Result<usize, String> {
-    let effective = storage::merge_aliases(user);
-    let Some(source) = effective.iter().find(|d| d.name == target) else {
+    let Some(idx) = aliases.iter().position(|d| d.name == target) else {
         return Err(format!("alias not found: {target}"));
     };
-    let idx = match user.iter().position(|d| d.name == target) {
-        Some(i) => i,
-        None => {
-            let mut owned = source.clone();
-            owned.builtin = false;
-            user.push(owned);
-            user.len() - 1
-        }
-    };
-    let def = &mut user[idx];
+    let def = &mut aliases[idx];
     let mut added = 0;
     for (key, value) in fresh {
         if !def.shortcuts.contains_key(key) {
@@ -270,17 +258,17 @@ pub fn merge_into(
 /// The entry point app code and tests share; [`find_file`] only locates the
 /// file, so tests can inject a fixture path directly.
 pub fn plan_and_merge(
-    user: &mut Vec<AliasDef>,
+    aliases: &mut [AliasDef],
     target: &str,
     path: &Path,
 ) -> Result<usize, String> {
     let entries = load(path)?;
-    let existing = storage::merge_aliases(user)
+    let existing = aliases
         .iter()
         .find(|d| d.name == target)
         .map(|d| d.shortcuts.clone())
         .ok_or_else(|| format!("alias not found: {target}"))?;
-    merge_into(user, target, &plan(&existing, &entries))
+    merge_into(aliases, target, &plan(&existing, &entries))
 }
 
 #[cfg(test)]

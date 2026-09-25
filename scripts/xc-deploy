@@ -1,0 +1,55 @@
+#!/bin/sh
+# xc-deploy [--bin PATH] [--no-desktop] USER@HOST [DEST]:
+# install the launcher - and, unless --no-desktop, the xc-bar/xc-key helpers -
+# on a machine reached over SSH, then smoke-test the copy there.
+#
+#   scripts/xc-deploy root@node02                  # release build -> /usr/local/bin
+#   scripts/xc-deploy --bin /usr/local/bin/xconsoler m@box /usr/bin
+#
+# The target needs no toolchain: only scp, chmod and a POSIX shell. Build the
+# binary for the target's architecture first (`cargo build --release`; cross
+# builds need the matching linker), and remember the terminal that *displays*
+# the bar decides whether the resize request is honoured - see the README's
+# "SSH deployment" section.
+set -u
+usage() { echo "usage: xc-deploy [--bin PATH] [--no-desktop] USER@HOST [DEST]" >&2; exit 1; }
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+bin="$here/../target/release/xconsoler"
+desktop=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --bin) [ $# -ge 2 ] || usage; bin=$2; shift 2 ;;
+        --no-desktop) desktop=0; shift ;;
+        -h|--help) usage ;;
+        -*) echo "unknown option: $1" >&2; usage ;;
+        *) break ;;
+    esac
+done
+[ $# -ge 1 ] || usage
+target=$1
+dest=${2:-/usr/local/bin}
+
+[ -f "$bin" ] || { echo "no binary at $bin - run: cargo build --release" >&2; exit 1; }
+[ -x "$bin" ] || { echo "not executable: $bin" >&2; exit 1; }
+
+files="$bin"
+if [ "$desktop" = 1 ]; then
+    for extra in "$here/xc-bar" "$here/xc-key"; do
+        [ -f "$extra" ] && files="$files $extra"
+    done
+fi
+
+echo "-> $target:$dest  ($files)"
+# shellcheck disable=SC2086 # the file list is intentionally word-split
+scp -q $files "$target:$dest/" || exit 1
+# shellcheck disable=SC2086
+ssh "$target" "cd '$dest' && chmod 755 $(for f in $files; do printf '%s ' "$(basename -- "$f")"; done)" || exit 1
+
+# Smoke test: the binary runs on the target and agrees on the bare height (4).
+rows=$(ssh "$target" 'd=$(mktemp -d); XC_PRINT_ROWS=1 xconsoler --print-rows --store "$d/store.json"; r=$?; rm -rf "$d"; exit $r') || {
+    echo "installed, but 'xconsoler --print-rows' failed on $target" >&2; exit 1; }
+echo "ok: $(basename -- "$bin") installed, bare height ${rows} rows"
+[ "$rows" = 4 ] || echo "note: expected 4 bare rows, got $rows" >&2
+echo "shell-key mode:   xconsoler --print-bind >> ~/.bashrc   (on $target)"
+[ "$desktop" = 1 ] && echo "desktop mode:     xc-bar | xc-key alt+d            (on the target's X session)"

@@ -78,36 +78,47 @@ registered value. The whole alias table lives on the `/settings` page.
 asks for its own height: 4 rows with nothing to show, otherwise 6 plus one
 row per candidate (16 at most), 13 for the palette's 7 commands, 24 for
 `/settings`. So the bar re-fits its own window whenever that number changes -
-you typing a query, clearing it, opening or closing the palette. It first
-writes the in-band request `ESC[8;<rows>;<cols>t`; terminals that ignore it
-(xterm without `allowWindowOps`, VTE, alacritty) are covered under X11 by
-`xdotool getactivewindow windowsize --usehints <cols> <rows>`, which sizes in
-character cells and is skipped under Wayland, where the compositor decides.
-The fallback only ever touches a window that provably belongs to this process
-tree: the focused window's pid must be ours or one of our ancestors. Each
-height is requested at most three times and the bar stops asking as soon as
-the terminal reports it, while a resize from outside - you dragging the
-window - wins and is adopted. Summon mode only, and `XC_ROWS`/`XC_NO_FIT`
-override it as described under the desktop hotkey below.
+you typing a query, clearing it, opening or closing the palette - and a plain
+`xconsoler` run shrinks the terminal it was started from just like a summoned
+bar shrinks its own window; the size the window had at startup (or the last
+one you picked by dragging it) comes back when the bar exits. It first writes
+the in-band request `ESC[8;<rows>;<cols>t`; terminals that ignore it (xterm
+without `allowWindowOps`, VTE, alacritty) are covered under X11 by `xdotool
+getactivewindow windowsize --usehints <cols> <rows>`, which sizes in character
+cells and is skipped under Wayland, where the compositor decides. The fallback
+only ever touches a window that provably belongs to this process tree: the
+focused window's pid must be ours or one of our ancestors. A request is
+repeated while the window does not report that height - a window still being
+mapped or focused hears none of the first tries - a few times on consecutive
+ticks and then every couple of seconds, up to eight asks per height, and the
+bar stops as soon as the terminal reports it, while a resize from outside -
+you dragging the window - wins and is adopted. Inside tmux the escape goes
+through the pane's passthrough (`ESC P tmux; ...`) to the outer terminal,
+which is asked for the pane height plus the status line; tmux 3.3+ needs
+`allow-passthrough` on for that, which the bar switches on for its window and
+puts back at exit, and a pane that shares its window with a split is left
+alone. `XC_ROWS`/`XC_NO_FIT` override all of it as described under the desktop
+hotkey below.
 
-## Built-in aliases
+## Seeded aliases
 
 | Alias | Linux                                        | macOS             | Registered shortcuts |
 |-------|----------------------------------------------|-------------------|----------------------|
 | `br`  | `xdg-open {input} >/dev/null 2>&1 &`         | `open {input} >/dev/null 2>&1 &` | `baidu` -> `https://www.baidu.com`, `gm` -> `https://mail.google.com` |
-| `cd`  | `@native clipboard` (built-in Rust backend)  | `@native clipboard` | -             |
+| `cd`  | `@native clipboard` (native Rust backend)    | `@native clipboard` | -             |
 
-Built-ins are exactly `br` and `cd` and they ship with their concrete content
-registered - the command templates above *and* the shortcuts - so `br baidu`
-works on a fresh machine with no store copy. Add more with `:arg` or the
-settings page.
+Every fresh store seeds exactly `br` and `cd`, concrete content included - the
+command templates above *and* the shortcuts - so `br baidu` works on a machine
+with no store copy yet. They are ordinary store entries: edit or delete them
+on the settings page (or with `:del`), and bring them back with `:add`. Add
+more with `:arg` or the settings page.
 
 Commands run in their own process group, so the apps they launch survive the
-bar dismissing itself (a summon success closes the terminal right away).
-Long-lived apps should still be backgrounded *and* redirected
-(`cmd <args> >/dev/null 2>&1 &`) so the bar returns and auto-dismisses — it
-waits for the command's output pipes to close, so `&` alone leaves a job
-holding them open (and costs you the stderr tail in failure messages).
+bar dismissing itself (a summon success closes the terminal right away). A
+backgrounded template (`thunar {input} &`) gets its stdio detached from the bar
+automatically, so a long-lived app cannot hold the bar's pipes open for its
+whole lifetime; the price is that a backgrounded failure reports its exit code
+without a stderr tail.
 
 ## Custom aliases (`:` commands)
 
@@ -130,7 +141,7 @@ Examples:
 :del gh
 ```
 
-The built-in `cd` alias copies through the [`arboard`](https://crates.io/crates/arboard)
+The seeded `cd` alias copies through the [`arboard`](https://crates.io/crates/arboard)
 crate directly — no `xclip` / `wl-copy` / `xsel` / `pbcopy` binaries required
 (Linux needs X11 or XWayland). Override it with `:add cd <cmd> // <cmd>` if
 you prefer your own tool.
@@ -149,12 +160,15 @@ platform's command. Only when *both* are missing does the run fail with
 Runs go through `sh -c`, and only a run that actually worked is remembered: a
 non-zero exit, a signal, a spawn failure or a missing command reports `✗ ...`
 and leaves the history untouched. A template that backgrounds its own work
-(`thunar {input} >/dev/null 2>&1 &`) would otherwise exit 0 the instant the job
-is forked, so the bar appends a short probe: the launch stays detached, but a
-job that is already gone after ~0.2 s (missing binary, bad argument) is reaped
-for its real status and reported as a failure instead of a fake success.
+(`thunar {input} &`) would otherwise exit 0 the instant the job is forked, so
+the bar appends a probe that waits for the job: a job that exits non-zero --
+even a second later -- is reported as a failure, and a job still running after
+roughly a second is reported as `↳ ... started (still running; not recorded)`
+instead of a fake success. The launch stays detached either way, so a launcher
+that takes its time (`xdg-open` before the browser is up) keeps running while
+nothing enters the history until it is known to have worked.
 
-Built-ins cannot be deleted; re-define them with `:add` to override.
+Seeded aliases are ordinary store entries: edit or delete them, and `:add` brings a name back.
 
 ### Shortcuts and triggers
 
@@ -172,9 +186,9 @@ Now `br baidu` opens `https://www.baidu.com`, while plain `br` and
 that key's value first, so `Enter` resolves it. The bar itself stays a
 single input line - the registered shortcuts are listed on the `/settings`
 page (`↳ baidu · https://www.baidu.com`). Values may contain spaces; history
-keeps the raw text (`baidu`), so the shorthand stays replayable. Setting a
-shortcut on a built-in alias materializes it as an overriding user
-definition.
+keeps the raw text (`baidu`), so the shorthand stays replayable. Shortcuts
+are edited in place on the settings page (`e` on a shortcut row) or replaced
+with `:arg`; aliases are plain store data, seeded ones included.
 
 Triggers live on the alias itself, comma-separated after its name:
 
@@ -210,21 +224,23 @@ host), and a key that is already taken becomes `<folder>-<key>` or gets a
 The usual profiles are scanned (`google-chrome`, `chromium`, the snap and
 flatpak trees; `Default` first) - point `XC_CHROME_BOOKMARKS` at one
 `Bookmarks` file to override that. The bar reports how many rows landed (or
-why the file could not be read). Importing into a built-in materializes it
-as an overriding user alias, the same way `:arg` does.
+why the file could not be read). The target alias is the one in the store,
+so `:import-chrome` with no argument fills the seeded `br` like any other.
 
 ## Command palette
 
 Press **alt+d** while the bar is shown to drop down a selectable list of the
-built-in `:`/`/` commands:
+`:`/`/` commands. Typing `/` does the same for slash commands only: the list
+opens as soon as the line starts with `/` and filters fuzzily as you type, so
+`/sett` narrows straight to `/settings`:
 
 * `↑`/`↓` (or `Tab`) move the selection.
 * `Enter` accepts. Complete commands run immediately (`:help` shows the
   colon-command help, `/settings` opens the settings page); commands that
   still need arguments (`:add`, `:del`, `:arg`, `:unarg`) prefill the input
   with a trailing space - type the rest and press Enter.
-* `Esc` closes the palette; so does typing (the character is inserted
-  normally).
+* `Esc` closes the list; typing plain text also closes it (the character is
+  inserted normally), while a `:`/`/` query keeps filtering it.
 
 The key is configurable and defaults to the wake key. While the bar is
 **hidden** it still wakes the bar, and in `--summon` mode it still quits -
@@ -238,8 +254,9 @@ xconsoler --command-key ctrl+k       # this run only, not persisted
 
 ## Settings page (`/settings`)
 
-Type `/settings` and press Enter for a full-screen alias manager
-(`Esc` or `q` returns to the bar; `Ctrl+C`/`Ctrl+D` quits):
+Type `/settings` and press Enter - or just `/s`, picked from the fuzzy list -
+for a full-screen alias manager (`Esc` or `q` returns to the bar;
+`Ctrl+C`/`Ctrl+D` quits):
 
 The table has one row per alias and five columns —
 `name | triggers | linux | macos | shortcuts` (missing commands show `—`,
@@ -254,23 +271,47 @@ long commands are truncated with `…`):
 * `s` — wizard for a new shortcut on the selected alias (or on the row of
   one of its triggers/shortcuts, which routes to that alias): key → value.
 * `t` — wizard for a new trigger on the selected alias.
-* `e` — edit the selected alias's linux and macos commands; both steps are
-  prefilled with the current values, `Ctrl+U` kills from the caret back to
-  the start of a field (`Ctrl+K` kills to the end) and a blank macos keeps
-  mirroring linux.
+* `e` — edit the selected row in place, prefilled with its current value:
+  an alias's linux and macos commands, a shortcut's key and value, or a
+  trigger's word. `Ctrl+U` kills from the caret back to the start of a field
+  (`Ctrl+K` kills to the end) and a blank macos keeps mirroring linux.
 * `d` — delete the selection: a shortcut row drops just that shortcut, a
-  trigger row just that trigger, an alias row the whole alias (built-ins
-  refuse; override them instead).
+  trigger row just that trigger, an alias row the whole alias, seeded ones
+  included.
 
 Every change is saved to `store.json` immediately.
 
 ## Storage
 
-* Store lives at `<config_dir>/xconsoler/store.json` (override with `--store`).
+* Store lives at `~/xconsoler/store.json` (override with `--store`). A store
+  left at the old `~/.config/xconsoler/store.json` path is picked up once,
+  when the **default** path does not exist yet; a custom `--store` never
+  falls back to it.
+* The file carries `version` (currently `3`). Stores older than 2 hold only
+  overrides of the seeded `br`/`cd`, so loading merges those defaults back in
+  (same-name stored aliases replace them in place, other names are appended);
+  legacy alias keys are normalized in memory. The new form reaches disk the
+  next time the file is saved - any `/settings` edit, a recorded run,
+  `--set-wake-key`/`--set-command-key`, or bar exit. A file from a **newer**
+  build is loaded as-is and never overwritten.
+* A corrupt `store.json` is moved to `store.json.corrupt` and replaced with a
+  fresh seeded store immediately, so a damaged file never blocks
+  startup.
 * Config carries `wake_key` and `command_key` (both default `alt+d`) in the
   same file; stores written before a key existed load with its default.
   Change them with `xconsoler --set-wake-key <spec>` and
   `xconsoler --set-command-key <spec>`.
+* Aliases on disk speak the same vocabulary as the settings page: `triggers`
+  holds the alternate trigger words and `shortcuts` maps a shortcut key to
+  the input it expands to. Legacy keys still load: a `shortcuts` **array** is
+  read as trigger words (unless `triggers` is present), an `args` map as the
+  shortcut map (unless the `shortcuts` map is present), and `builtin` is
+  ignored. A fresh entry looks like this (stores written by older builds are
+  migrated on load, so nothing to do by hand):
+  ```json
+  {"name":"br","triggers":["b"],"linux":"xdg-open {input}","macos":null,
+   "shortcuts":{"baidu":"https://www.baidu.com"}}
+  ```
 * Inputs are stored as **base64 of the plain text**, so quotes/unicode/newlines
   round-trip safely and nothing secret-looking is kept in cleartext.
 * History: up to **100** entries, newest first, deduplicated per
@@ -384,10 +425,21 @@ Over plain SSH you can bind a shell key at the prompt so the launcher
 cargo build --release
 sudo cp target/release/xconsoler /usr/local/bin/
 
+# or stage the whole thing on another machine over SSH (binary + helpers +
+# a `--print-rows` smoke test there):
+scripts/xc-deploy root@host            # --bin PATH / --no-desktop / [DEST]
+
 # print the binding for your rc file (~/.bashrc):
 xconsoler --print-bind                 # >> paste into ~/.bashrc
 xconsoler --print-bind --shell zsh     # zsh flavour (bindkey + ZLE widget)
 ```
+
+Over SSH the fit can only use the resize escape, so the *terminal in front of
+you* decides: VTE/gnome-terminal, xterm (with `allowWindowOps`), kitty and
+wezterm honour it, while several emulators ignore window ops by policy. Inside
+tmux the request travels in the passthrough envelope, which needs tmux 3.3+
+`allow-passthrough on` - the bar switches that on for its own window while it
+runs, and restores the previous value on exit.
 
 The default bash binding (one line, paste it into `~/.bashrc`):
 

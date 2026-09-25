@@ -11,15 +11,26 @@ use crate::platform::{self, Platform};
 /// Result of running an alias command.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecOutcome {
+    /// The command ran and exited zero: the only outcome worth recording.
     Success(String),
+    /// The command ran and failed visibly.
     Failure(String),
+    /// A backgrounded command was still running when the grace period ran
+    /// out, so it never proved success (nor failed visibly). Callers must not
+    /// record it: a launch that only *may* have worked must not enter the
+    /// history. The job itself stays detached and keeps running.
+    Started(String),
 }
 
 const STDIN_MARKER: &str = "@stdin";
 const INPUT_PLACEHOLDER: &str = "{input}";
-/// Grace period the background probe allows a launched program to either stay
-/// alive or die visibly.
-const BG_GRACE_SECS: &str = "0.2";
+/// How long a backgrounded job gets to prove itself (exit zero) or die
+/// visibly. After this the run is only `Started`.
+const BG_GRACE_SECS: &str = "1";
+/// Exit status the probe reports when that grace period expires while the job
+/// is still running. 125 is `timeout(1)`'s "the command did not finish" code
+/// and is not produced by a shell itself.
+const BG_STILL_RUNNING: i32 = 125;
 
 /// True when a template backgrounds its own work, i.e. ends in a single `&`
 /// (`&&` is a shell operator, not a backgrounded job).
@@ -31,16 +42,27 @@ fn backgrounds(template: &str) -> bool {
 /// Probe appended to a backgrounding template. Without it `sh` exits 0 the
 /// instant the job is forked, so a launch that dies at once (missing binary,
 /// bad argument) still looked like a success and entered the history. `$!` is
-/// the job's pid: an empty one means the template backgrounded nothing (a plain
-/// success), a pid still alive after the grace period means the program started
-/// (also a success, and the job stays detached), and a pid that is already gone
-/// is reaped for its real exit status.
+/// the job's pid:
+///
+/// - empty: the template backgrounded nothing (`echo x \&`), a plain success;
+/// - exits inside the grace: reaped, its real status decides;
+/// - still alive when the grace expires: the watchdog subshell TERMs the
+///   probe, whose trap exits `BG_STILL_RUNNING` -- the job neither proved
+///   nor disproved success, and is left running detached.
+///
+/// The watchdog also bounds how long the bar can block, which matters
+/// because a backgrounded job keeps running after the probe is gone.
 fn bg_probe(grace: &str) -> String {
     // The `\`-continuations below eat the newline and the next line's leading
     // whitespace, so the produced command keeps exactly one space per gap.
+    // `$$` inside the subshell is still the probe shell's pid, and the trap
+    // turns the watchdog's TERM into a plain exit status.
     format!(
-        "p=$!; if [ -z \"$p\" ]; then exit 0; fi; sleep {grace}; \
-         if kill -0 \"$p\" 2>/dev/null; then exit 0; fi; wait \"$p\"; exit $?"
+        "p=$!; if [ -z \"$p\" ]; then exit 0; fi; \
+         trap 'exit {BG_STILL_RUNNING}' TERM; \
+         ( sleep {grace}; kill -TERM $$ ) & w=$!; \
+         wait \"$p\"; rc=$?; \
+         kill \"$w\" 2>/dev/null; wait \"$w\" 2>/dev/null; exit \"$rc\""
     )
 }
 
@@ -149,7 +171,8 @@ pub fn run_alias(def: &AliasDef, input: &str, platform: Platform) -> ExecOutcome
         cmd = cmd.replace(INPUT_PLACEHOLDER, &shell_quote(input));
     }
 
-    if backgrounds(&cmd) {
+    let bg = backgrounds(&cmd);
+    if bg {
         cmd.push(' ');
         cmd.push_str(&bg_probe(BG_GRACE_SECS));
     }
@@ -169,8 +192,12 @@ pub fn run_alias(def: &AliasDef, input: &str, platform: Platform) -> ExecOutcome
         } else {
             Stdio::null()
         })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        // A detached job must not inherit the bar's pipes: it would hold the
+        // read end open for its whole lifetime, freezing `wait_with_output`
+        // until the job exits, and would die with SIGPIPE once the bar does.
+        // Diagnostics for a backgrounded run come from its exit status alone.
+        .stdout(if bg { Stdio::null() } else { Stdio::piped() })
+        .stderr(if bg { Stdio::null() } else { Stdio::piped() })
         .spawn()
     {
         Ok(c) => c,
@@ -196,12 +223,29 @@ pub fn run_alias(def: &AliasDef, input: &str, platform: Platform) -> ExecOutcome
 
     if output.status.success() {
         ExecOutcome::Success(format!("{} ok", def.name))
+    } else if bg && output.status.code() == Some(BG_STILL_RUNNING) {
+        // The watchdog fired: the job is still running, so nothing about it
+        // is proven and the history must stay untouched.
+        ExecOutcome::Started(format!("{} started", def.name))
     } else {
         let stderr_tail = tail_chars(&String::from_utf8_lossy(&output.stderr), 200);
         match output.status.code() {
-            Some(code) => ExecOutcome::Failure(format!("exit {code}: {stderr_tail}")),
-            None => ExecOutcome::Failure(format!("terminated by signal: {stderr_tail}")),
+            Some(code) => {
+                ExecOutcome::Failure(failure_message(&format!("exit {code}"), &stderr_tail))
+            }
+            None => ExecOutcome::Failure(failure_message("terminated by signal", &stderr_tail)),
         }
+    }
+}
+
+/// `exit 3: <stderr tail>`, with the tail dropped when the command wrote
+/// nothing to stderr (always the case for a backgrounded run).
+fn failure_message(head: &str, stderr_tail: &str) -> String {
+    let tail = stderr_tail.trim();
+    if tail.is_empty() {
+        head.to_string()
+    } else {
+        format!("{head}: {tail}")
     }
 }
 
@@ -227,7 +271,6 @@ mod tests {
             linux: Some(linux.to_string()),
             macos: None,
             shortcuts: BTreeMap::new(),
-            builtin: false,
         }
     }
 
@@ -325,7 +368,7 @@ mod tests {
         // macOS without a macos command: the linux one serves both.
         match run_alias(&def("browser", "printf %s {input}"), "x", Platform::Macos) {
             ExecOutcome::Success(msg) => assert_eq!(msg, "browser ok"),
-            ExecOutcome::Failure(msg) => panic!("expected the linux fallback to run: {msg}"),
+            other => panic!("expected the linux fallback to run: {other:?}"),
         }
         // ... and the same the other way round.
         let macos_only = AliasDef {
@@ -334,7 +377,6 @@ mod tests {
             linux: None,
             macos: Some("printf %s {input}".to_string()),
             shortcuts: BTreeMap::new(),
-            builtin: false,
         };
         assert_eq!(
             run_alias(&macos_only, "x", Platform::Linux),
@@ -347,7 +389,6 @@ mod tests {
             linux: Some("   ".to_string()),
             macos: Some("printf %s {input}".to_string()),
             shortcuts: BTreeMap::new(),
-            builtin: false,
         };
         assert_eq!(
             run_alias(&blank_linux, "x", Platform::Linux),
@@ -363,19 +404,18 @@ mod tests {
             linux: None,
             macos: None,
             shortcuts: BTreeMap::new(),
-            builtin: false,
         };
         match run_alias(&none, "x", Platform::Linux) {
             ExecOutcome::Failure(msg) => {
                 assert!(msg.contains("no command configured for linux"), "{msg}")
             }
-            ExecOutcome::Success(_) => panic!("expected failure"),
+            other => panic!("expected failure, got {other:?}"),
         }
         match run_alias(&none, "x", Platform::Macos) {
             ExecOutcome::Failure(msg) => {
                 assert!(msg.contains("no command configured for macos"), "{msg}")
             }
-            ExecOutcome::Success(_) => panic!("expected failure"),
+            other => panic!("expected failure, got {other:?}"),
         }
         // Blank on both sides is just as missing.
         let blank = AliasDef {
@@ -397,7 +437,7 @@ mod tests {
     fn empty_input_with_placeholder_fails() {
         match run_alias(&def("browser", "printf %s {input}"), "   ", Platform::Linux) {
             ExecOutcome::Failure(msg) => assert_eq!(msg, "input required"),
-            ExecOutcome::Success(_) => panic!("expected failure"),
+            other => panic!("expected failure, got {other:?}"),
         }
     }
 
@@ -423,7 +463,7 @@ mod tests {
     fn failing_command_reports_exit_code() {
         match run_alias(&def("bad", "exit 7"), "", Platform::Linux) {
             ExecOutcome::Failure(msg) => assert!(msg.contains('7'), "{msg}"),
-            ExecOutcome::Success(_) => panic!("expected failure"),
+            other => panic!("expected failure, got {other:?}"),
         }
     }
 
@@ -435,7 +475,7 @@ mod tests {
                 assert!(msg.contains('3'), "{msg}");
                 assert!(msg.contains("boom"), "{msg}");
             }
-            ExecOutcome::Success(_) => panic!("expected failure"),
+            other => panic!("expected failure, got {other:?}"),
         }
     }
 
@@ -474,11 +514,13 @@ mod tests {
 
     #[test]
     fn the_probe_command_has_no_stray_whitespace() {
-        let probe = bg_probe("0.2");
+        let probe = bg_probe("0.5");
         let expected = concat!(
-            "p=$!; if [ -z \"$p\" ]; then exit 0; fi; sleep 0.2; ",
-            "if kill -0 \"$p\" 2>/dev/null; then exit 0; fi; ",
-            "wait \"$p\"; exit $?"
+            "p=$!; if [ -z \"$p\" ]; then exit 0; fi; ",
+            "trap 'exit 125' TERM; ",
+            "( sleep 0.5; kill -TERM $$ ) & w=$!; ",
+            "wait \"$p\"; rc=$?; ",
+            "kill \"$w\" 2>/dev/null; wait \"$w\" 2>/dev/null; exit \"$rc\""
         );
         assert_eq!(probe, expected);
         assert!(!probe.contains("  "), "stray double space in {probe:?}");
@@ -487,11 +529,12 @@ mod tests {
     #[test]
     fn the_probe_reports_the_real_status_of_a_fast_background_failure() {
         // The job dies with a real non-zero code inside the grace period, so
-        // the probe must reap and report that code, not a generic one.
+        // the probe must reap and report that code, not a generic one. A
+        // backgrounded run has no stderr, so the message is the code alone.
         let d = def("bg", "false >/dev/null 2>&1 &");
         match run_alias(&d, "", Platform::Linux) {
-            ExecOutcome::Failure(msg) => assert!(msg.contains("exit 1"), "{msg}"),
-            ExecOutcome::Success(out) => panic!("must report exit 1, got {out:?}"),
+            ExecOutcome::Failure(msg) => assert_eq!(msg, "exit 1"),
+            other => panic!("must report exit 1, got {other:?}"),
         }
     }
 
@@ -504,7 +547,7 @@ mod tests {
         assert!(backgrounds(template), "the probe must be appended");
         match run_alias(&def("bg", template), "", Platform::Linux) {
             ExecOutcome::Success(msg) => assert_eq!(msg, "bg ok"),
-            ExecOutcome::Failure(msg) => panic!("expected success, got {msg}"),
+            other => panic!("expected success, got {other:?}"),
         }
     }
 
@@ -513,17 +556,31 @@ mod tests {
         let d = def("bg", "nosuchbin_xconsoler_probe {input} >/dev/null 2>&1 &");
         match run_alias(&d, "x", Platform::Linux) {
             ExecOutcome::Failure(msg) => assert!(msg.contains("127"), "{msg}"),
-            ExecOutcome::Success(out) => panic!("must fail, got {out:?}"),
+            other => panic!("must fail, got {other:?}"),
         }
     }
 
     #[test]
-    fn the_probe_accepts_a_backgrounded_launch_that_starts() {
-        let d = def("bg", "sleep 3 >/dev/null 2>&1 &");
-        assert!(matches!(
-            run_alias(&d, "", Platform::Linux),
-            ExecOutcome::Success(_)
-        ));
+    fn the_probe_calls_a_job_that_outlives_the_grace_started() {
+        // Living on is not proof of success: `xdg-open` with no browser
+        // installed also lives on (it is stuck), and recording it was the
+        // bug that put failed launches into the history.
+        let d = def("bg", "sleep 2 >/dev/null 2>&1 &");
+        match run_alias(&d, "", Platform::Linux) {
+            ExecOutcome::Started(msg) => assert_eq!(msg, "bg started"),
+            other => panic!("expected started, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_probe_reports_a_backgrounded_failure_inside_the_grace() {
+        // Failing late -- after the old fixed 0.2s window -- must still count
+        // as a failure, not as a success.
+        let d = def("bg", "(sleep 0.3; exit 9) >/dev/null 2>&1 &");
+        match run_alias(&d, "", Platform::Linux) {
+            ExecOutcome::Failure(msg) => assert!(msg.contains("exit 9"), "{msg}"),
+            other => panic!("expected exit 9, got {other:?}"),
+        }
     }
 
     #[test]
@@ -539,10 +596,11 @@ mod tests {
     fn the_probe_does_not_wait_for_the_program_to_finish() {
         let d = def("bg", "sleep 5 >/dev/null 2>&1 &");
         let t0 = std::time::Instant::now();
-        run_alias(&d, "", Platform::Linux);
+        let outcome = run_alias(&d, "", Platform::Linux);
         let elapsed = t0.elapsed();
+        assert!(matches!(outcome, ExecOutcome::Started(_)), "{outcome:?}");
         assert!(
-            elapsed < std::time::Duration::from_secs(2),
+            elapsed < std::time::Duration::from_secs(3),
             "the bar blocked for {elapsed:?}"
         );
     }

@@ -97,11 +97,16 @@ fn draw_shown(f: &mut Frame, app: &App) {
     draw_status(f, app, width, y);
 }
 
-/// Command palette under the input box: one row per built-in `:`/`/` command,
-/// Up/Down to move, Enter to accept, Esc to close. Scrolls so the selection
-/// stays visible; a terminal with no room degrades to no list.
+/// Command palette under the input box: one row per command matching the
+/// current `:`/`/` query (the whole catalog for plain input), Up/Down to
+/// move, Enter to accept, Esc to close. Scrolls so the selection stays
+/// visible; no rows or no room degrades to no list.
 fn draw_palette(f: &mut Frame, app: &App, width: u16, y: u16) -> u16 {
-    let total = commands::len();
+    let items = commands::palette_items(&app.input);
+    let total = items.len();
+    if total == 0 {
+        return y;
+    }
     // Same framed/bare split as the candidate list (see `panel_rows`).
     let (framed, rows) = panel_rows(f.area().height, y, total, app.status.is_some());
     if rows == 0 {
@@ -112,7 +117,7 @@ fn draw_palette(f: &mut Frame, app: &App, width: u16, y: u16) -> u16 {
     let inner_width = width.saturating_sub(if framed { 2 } else { 0 });
     let sel_style = Style::new().bg(SELECT_BG).fg(TEXT);
     let mut lines = Vec::with_capacity(rows);
-    for (i, spec) in commands::ALL.iter().enumerate().skip(start).take(rows) {
+    for (i, spec) in items.iter().enumerate().skip(start).take(rows) {
         let segs = vec![
             (format!(" {} ", spec.token), Style::new().fg(ACCENT)),
             (spec.desc.to_string(), Style::new().fg(MUTED)),
@@ -449,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn colon_and_settings_inputs_draw_no_candidate_list() {
+    fn colon_input_draws_no_candidate_list_while_slash_shows_the_palette() {
         let mut app = app_with_history();
         app.input = ":".to_string();
         app.caret = 1;
@@ -460,16 +465,51 @@ mod tests {
         assert_eq!(row_of(&colon, "❯ :"), Some(1), "content row: {colon}");
         assert!(colon.contains("Enter run"), "hints still drawn: {colon}");
 
+        // `/settings` is a live slash query: the palette follows it.
         app.input = "/settings".to_string();
         app.caret = app.input.chars().count();
+        app.palette = Some(0);
         let slash = draw_once(&app);
-        assert!(!slash.contains("matches ·"), "no list: {slash}");
-        assert_eq!(slash.matches('╭').count(), 1, "input box only: {slash}");
+        assert!(slash.contains("commands · 1"), "palette title: {slash}");
+        assert_eq!(
+            slash.matches('╭').count(),
+            2,
+            "input box + palette frame: {slash}"
+        );
         assert_eq!(
             row_of(&slash, "❯ /settings"),
             Some(1),
-            "typed input: {slash}"
+            "content row: {slash}"
         );
+        assert_eq!(
+            row_of(&slash, "open the settings page"),
+            Some(INPUT_BOX_H as usize + 1),
+            "the /settings row under the box: {slash}"
+        );
+        assert!(slash.contains("Enter run"), "hints below: {slash}");
+    }
+
+    #[test]
+    fn slash_query_filters_the_palette_rows() {
+        let mut app = app_with_history();
+        app.input = "/se".to_string();
+        app.caret = app.input.chars().count();
+        app.palette = Some(0);
+        let text = draw_once(&app);
+        assert!(text.contains("commands · 1"), "one match: {text}");
+        assert_eq!(
+            row_of(&text, "open the settings page"),
+            Some(INPUT_BOX_H as usize + 1),
+            "the /settings row: {text}"
+        );
+
+        // A query with no hits paints no palette frame at all.
+        app.input = "/zz".to_string();
+        app.caret = app.input.chars().count();
+        let none = draw_once(&app);
+        assert!(!none.contains("commands ·"), "no palette title: {none}");
+        assert_eq!(none.matches('╭').count(), 1, "input box only: {none}");
+        assert_eq!(row_of(&none, "❯ /zz"), Some(1), "content row: {none}");
     }
 
     #[test]

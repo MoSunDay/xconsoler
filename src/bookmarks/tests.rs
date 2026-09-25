@@ -164,17 +164,17 @@ fn plan_slugs_collisions_and_existing_key_protection() {
 }
 
 #[test]
-fn merge_into_materialises_a_builtin_and_never_overwrites() {
-    let mut user = Vec::new();
+fn merge_into_never_overwrites_and_only_adds_missing_keys() {
+    let mut aliases = crate::alias::defaults();
     let fresh = [("x".to_string(), "https://x.example".to_string())];
-    assert_eq!(merge_into(&mut user, "br", &fresh).unwrap(), 1);
-    assert_eq!(user.len(), 1);
-    assert!(!user[0].builtin, "the override is user-owned");
+    assert_eq!(merge_into(&mut aliases, "br", &fresh).unwrap(), 1);
+    assert_eq!(aliases.len(), 2, "edited in place, no copy appears");
+    let br = aliases.iter().find(|d| d.name == "br").unwrap();
     assert_eq!(
-        user[0].linux.as_deref(),
+        br.linux.as_deref(),
         Some("xdg-open {input} >/dev/null 2>&1 &")
     );
-    let rows: Vec<String> = user[0]
+    let rows: Vec<String> = br
         .shortcuts
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
@@ -189,16 +189,23 @@ fn merge_into_materialises_a_builtin_and_never_overwrites() {
     );
 
     let overwrite = [("x".to_string(), "https://other.example".to_string())];
-    assert_eq!(merge_into(&mut user, "br", &overwrite).unwrap(), 0);
+    assert_eq!(merge_into(&mut aliases, "br", &overwrite).unwrap(), 0);
     assert_eq!(
-        user[0].shortcuts.get("x").map(String::as_str),
+        aliases
+            .iter()
+            .find(|d| d.name == "br")
+            .unwrap()
+            .shortcuts
+            .get("x")
+            .map(String::as_str),
         Some("https://x.example")
     );
-    assert_eq!(user.len(), 1, "user defs are updated in place");
+    assert_eq!(aliases.len(), 2, "existing entries stay in place");
     assert_eq!(
-        merge_into(&mut user, "ghost", &fresh).unwrap_err(),
+        merge_into(&mut aliases, "ghost", &fresh).unwrap_err(),
         "alias not found: ghost"
     );
+    assert_eq!(aliases.len(), 2, "a missing target changes nothing");
 }
 
 #[test]
@@ -207,22 +214,32 @@ fn plan_and_merge_is_re_runnable() {
     let path = dir.path().join("Bookmarks");
     fs::write(&path, TREE).unwrap();
 
-    let mut user = Vec::new();
-    assert_eq!(plan_and_merge(&mut user, "br", &path).unwrap(), 7);
+    let mut aliases = crate::alias::defaults();
+    assert_eq!(plan_and_merge(&mut aliases, "br", &path).unwrap(), 7);
+    let br = aliases.iter().find(|d| d.name == "br").unwrap();
     assert_eq!(
-        user[0].shortcuts.get("rust").map(String::as_str),
+        br.shortcuts.get("rust").map(String::as_str),
         Some("https://www.rust-lang.org/")
     );
     assert_eq!(
-        user[0].shortcuts.get("bad-title-2").map(String::as_str),
+        br.shortcuts.get("bad-title-2").map(String::as_str),
         Some("https://example.org/b")
     );
-    let after_first = user[0].shortcuts.len();
+    let after_first = br.shortcuts.len();
 
-    assert_eq!(plan_and_merge(&mut user, "br", &path).unwrap(), 0);
-    assert_eq!(user[0].shortcuts.len(), after_first, "re-runs add nothing");
+    assert_eq!(plan_and_merge(&mut aliases, "br", &path).unwrap(), 0);
     assert_eq!(
-        plan_and_merge(&mut user, "ghost", &path).unwrap_err(),
+        aliases
+            .iter()
+            .find(|d| d.name == "br")
+            .unwrap()
+            .shortcuts
+            .len(),
+        after_first,
+        "re-runs add nothing"
+    );
+    assert_eq!(
+        plan_and_merge(&mut aliases, "ghost", &path).unwrap_err(),
         "alias not found: ghost"
     );
 }

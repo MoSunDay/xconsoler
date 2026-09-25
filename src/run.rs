@@ -71,6 +71,13 @@ pub fn execute(app: &mut App, platform: Platform, path: &Path) {
                 app.quit = true;
             }
         }
+        ExecOutcome::Started(msg) => {
+            // Still running when the grace ran out: nothing proved success,
+            // so nothing is recorded. Not a failure either -- the input
+            // survives (it would otherwise be lost, since an unproven run is
+            // not in the history) and the bar stays open to show why.
+            app.status = Some((true, format!("{msg} (still running; not recorded)")));
+        }
         ExecOutcome::Failure(msg) => {
             // Keep the input so it can be fixed and retried.
             app.status = Some((false, msg));
@@ -203,7 +210,9 @@ mod tests {
         assert_eq!(reloaded.history.len(), 1);
         assert_eq!(reloaded.history[0].input(), "hello");
         assert_ne!(reloaded.history[0].input_b64, "hello"); // stored base64
-        assert_eq!(reloaded.aliases.len(), 1);
+        assert_eq!(reloaded.aliases.len(), 3, "br, cd and t round-trip");
+        let t = reloaded.aliases.iter().find(|d| d.name == "t").unwrap();
+        assert_eq!(t.triggers, vec!["tt".to_string()]);
     }
 
     /// The highlighted shortcut row runs for a typed `<alias> <partial>`,
@@ -391,5 +400,27 @@ mod tests {
         // The failure branch only sets the status, so the input survives for
         // a retry.
         assert_eq!(app.input, "bg", "input kept for retry: {:?}", app.input);
+    }
+
+    #[test]
+    fn a_backgrounded_launch_that_never_proves_success_records_no_history() {
+        let (mut app, _dir, path) = setup();
+        shown(&mut app);
+        type_str(&mut app, ":add bg sleep 3 >/dev/null 2>&1 &", &path);
+        apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
+        app.input = "bg".to_string();
+        apply(&mut app, Action::Execute, Platform::Linux, &path);
+        assert!(
+            matches!(&app.status, Some((true, msg)) if msg.contains("not recorded")),
+            "status: {:?}",
+            app.status
+        );
+        assert!(
+            app.store.history.is_empty(),
+            "an unproven launch must not enter history: {:?}",
+            app.store.history
+        );
+        // It is not in the history, so losing the input would lose the run.
+        assert_eq!(app.input, "bg", "input kept: {:?}", app.input);
     }
 }

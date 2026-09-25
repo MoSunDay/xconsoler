@@ -181,7 +181,7 @@ mod tests {
     }
 
     fn with_shortcuts() -> Vec<AliasDef> {
-        let mut def = alias::defaults().remove(0); // br (builtin)
+        let mut def = alias::defaults().remove(0); // br (seeded default)
         def.shortcuts.clear(); // fixture: exactly the shortcuts below
         def.shortcuts
             .insert("baidu".to_string(), "https://www.baidu.com".to_string());
