@@ -46,23 +46,24 @@ The bar draws an **input box**, a **candidate list** and one status line
 (no window title). With an empty input the list shows your **recent history
 only** - newest first, deduplicated, up to **10 rows**. Typing switches it to
 the ranked list of up to **5 candidates**: matching history first (newest
-first), then registered aliases by fuzzy score, which only fill the slots
-history leaves. `<alias> <partial>` lists that alias's quick-launch entries
-(its named args). `↑`/`↓`/`Tab` move
+first), then concrete registered shortcuts by fuzzy score, which only fill
+the slots history leaves. `<alias> <partial>` lists that alias's matching
+shortcuts - a shortcut is a key such as `baidu` mapped to a concrete value,
+and bare alias names never show up as rows of their own. `↑`/`↓`/`Tab` move
 the highlight - the window scrolls once you reach its bottom - and `Enter`
-runs the highlighted row: a history row replays its recorded pair, an alias
-row runs the alias, an arg row runs the mapped value. The whole alias table
-lives on the `/settings` page.
+runs the highlighted row: a history row replays its recorded pair, a shortcut
+row runs the registered value. The whole alias table lives on the `/settings`
+page.
 
 ## Built-in aliases
 
-| Alias | Linux                                        | macOS             | Registered args |
-|-------|----------------------------------------------|-------------------|-----------------|
+| Alias | Linux                                        | macOS             | Registered shortcuts |
+|-------|----------------------------------------------|-------------------|----------------------|
 | `br`  | `xdg-open {input} >/dev/null 2>&1 &`         | `open {input} >/dev/null 2>&1 &` | `baidu` -> `https://www.baidu.com`, `gm` -> `https://mail.google.com` |
 | `cd`  | `@native clipboard` (built-in Rust backend)  | `@native clipboard` | -             |
 
 Built-ins are exactly `br` and `cd` and they ship with their concrete content
-registered - the command templates above *and* the named args - so `br baidu`
+registered - the command templates above *and* the shortcuts - so `br baidu`
 works on a fresh machine with no store copy. Add more with `:arg` or the
 settings page.
 
@@ -78,10 +79,10 @@ holding them open (and costs you the stderr tail in failure messages).
 Type a line starting with `:` and press Enter:
 
 ```
-:add <name>[,<shortcut>...] <linux-cmd> [// <macos-cmd>]
+:add <name>[,<trigger>...] <linux-cmd> [// <macos-cmd>]
 :del <name>
-:arg <name> <key> <value...>       # register a named argument
-:unarg <name> <key>                # remove a named argument
+:arg <name> <key> <value...>       # register a shortcut (key -> value)
+:unarg <name> <key>                # remove a shortcut
 :help
 ```
 
@@ -119,9 +120,12 @@ for its real status and reported as a failure instead of a fake success.
 
 Built-ins cannot be deleted; re-define them with `:add` to override.
 
-### Named arguments
+### Shortcuts and triggers
 
-Give an alias short names for the inputs you use all the time:
+A **shortcut** is a key mapped to one concrete value, and a **trigger** is an
+extra word the alias answers to.
+
+Give an alias shortcuts for the inputs you use all the time:
 
 ```
 :arg br baidu https://www.baidu.com
@@ -130,11 +134,24 @@ Give an alias short names for the inputs you use all the time:
 Now `br baidu` opens `https://www.baidu.com`, while plain `br` and
 `br <anything else>` behave exactly as before: typing `<alias> <key>` ranks
 that key's value first, so `Enter` resolves it. The bar itself stays a
-single input line - the registered keys are listed on the `/settings` page
-(`↳ baidu · https://www.baidu.com`). Values may contain spaces; history
-keeps the raw text (`baidu`), so the shorthand stays replayable. Setting an
-argument on a built-in alias materializes it as an overriding user
+single input line - the registered shortcuts are listed on the `/settings`
+page (`↳ baidu · https://www.baidu.com`). Values may contain spaces; history
+keeps the raw text (`baidu`), so the shorthand stays replayable. Setting a
+shortcut on a built-in alias materializes it as an overriding user
 definition.
+
+Triggers live on the alias itself, comma-separated after its name:
+
+```
+:add gh,git-open xdg-open https://github.com/{input}
+```
+
+Here `gh` is the name and `git-open` is a trigger, so both `gh me` and
+`git-open me` run the same command. Triggers are alternate spellings, never
+rows: the candidate list only ever shows history and concrete shortcuts.
+
+Both kinds are managed on the `/settings` page (or from the colon commands
+above).
 
 ## Command palette
 
@@ -165,24 +182,24 @@ Type `/settings` and press Enter for a full-screen alias manager
 (`Esc` or `q` returns to the bar):
 
 The table has one row per alias and five columns —
-`name | shortcuts | linux | macos | args` (missing commands show `—`, long
-commands are truncated with `…`):
+`name | triggers | linux | macos | shortcuts` (missing commands show `—`,
+long commands are truncated with `…`):
 
 * `↑`/`↓` (or `j`/`k`) move the selection, `Enter`/`→` expands an alias to
-  show its quick-launch entries (shortcuts first, then named args), `←`
+  show its triggers and shortcuts (triggers first, then shortcuts), `←`
   collapses.
-* `n` — wizard for a new alias: name → shortcuts (comma-separated, may be
+* `n` — wizard for a new alias: name → triggers (comma-separated, may be
   empty) → linux command (use `{input}` where the input goes) → macos
   command (empty = same as linux).
-* `s` — add a quick-launch shortcut to the selected alias (works on a
-  shortcut row too, which routes to its parent alias).
+* `s` — wizard for a new shortcut on the selected alias (or on the row of
+  one of its triggers/shortcuts, which routes to that alias): key → value.
+* `t` — wizard for a new trigger on the selected alias.
 * `e` — edit the selected alias's linux and macos commands; both steps are
   prefilled with the current values, `Ctrl+U` clears a field and a blank
   macos keeps mirroring linux.
-* `a` — wizard for a new named argument on the selected alias: key → value.
-* `d` — delete the selection: a shortcut row drops just that shortcut, an arg
-  row just that argument, an alias row the whole alias (built-ins refuse;
-  override them instead).
+* `d` — delete the selection: a shortcut row drops just that shortcut, a
+  trigger row just that trigger, an alias row the whole alias (built-ins
+  refuse; override them instead).
 
 Every change is saved to `store.json` immediately.
 
@@ -198,11 +215,11 @@ Every change is saved to `store.json` immediately.
 * History: up to **10 000** entries, newest first, deduplicated per
   `alias + input` (re-running moves the entry to the top). **Failed runs are
   never recorded** — see the placeholder section above.
-* Matching: fuzzy over `label + input` (history) and `name + shortcuts`
-  (aliases); an empty input lists the recent history only (up to 10 rows),
-  while a typed query ranks up to 5 candidates - matching history first
-  (newest first), then aliases by fuzzy score filling only the slots history
-  leaves.
+* Matching: fuzzy over `label + input` for history, and over
+  `name + triggers + key + value` for shortcuts; an empty input lists the
+  recent history only (up to 10 rows), while a typed query ranks up to 5
+  candidates - matching history first (newest first), then concrete
+  shortcuts by fuzzy score filling only the slots history leaves.
 
 ## Global wake-up
 

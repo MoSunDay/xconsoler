@@ -1,9 +1,10 @@
 //! Wizard form for the `/settings` page: collects a new alias (name →
-//! shortcuts → linux command → macos command), a new shortcut, an edit of an
-//! alias's linux/macos commands, or a new named argument (key → value) from a
-//! single bottom input line, validating each field on Enter before advancing.
-//! Pure data + free functions; the store is only read (duplicate-name checks)
-//! — submissions are applied by [`crate::settings`] / [`crate::settings_apply`].
+//! triggers → linux command → macos command), a new concrete shortcut
+//! (key → value), an edit of an alias's linux/macos commands, or a new
+//! trigger word from a single bottom input line, validating each field on
+//! Enter before advancing. Pure data + free functions; the store is only read
+//! (duplicate-name checks) — submissions are applied by [`crate::settings`] /
+//! [`crate::settings_apply`].
 
 use std::collections::BTreeMap;
 
@@ -16,11 +17,12 @@ use crate::storage::Store;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Purpose {
     NewAlias,
-    NewArg {
+    /// One shortcut (key → value) added to an existing alias.
+    NewShortcut {
         alias: String,
     },
-    /// One quick-launch shortcut added to an existing alias.
-    NewShortcut {
+    /// One trigger word added to an existing alias.
+    NewTrigger {
         alias: String,
     },
     /// Rewrite an existing alias's linux/macos commands (both prefilled).
@@ -33,15 +35,17 @@ pub enum Purpose {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Submission {
     Alias(AliasDef),
-    Arg {
+    /// A concrete key → value shortcut on an alias (refused if the key
+    /// already exists).
+    Shortcut {
         alias: String,
         key: String,
         value: String,
     },
-    /// Applied by `alias::add_shortcut` through the settings effect path.
-    Shortcut {
+    /// A trigger word on an alias (refused if already registered there).
+    Trigger {
         alias: String,
-        shortcut: String,
+        trigger: String,
     },
     /// Applied by `alias::set_commands` (blank macos mirrors linux).
     Commands {
@@ -58,12 +62,12 @@ pub struct Form {
     pub purpose: Purpose,
     pub step: usize,
     pub name: String,
-    pub shortcuts: String,
-    pub shortcut: String,
+    pub triggers: String,
+    pub trigger: String,
     pub linux: String,
     pub macos: String,
-    pub arg_key: String,
-    pub arg_value: String,
+    pub shortcut_key: String,
+    pub shortcut_value: String,
     pub input: String,
     pub error: Option<String>,
 }
@@ -87,21 +91,21 @@ pub fn new_alias() -> Form {
         purpose: Purpose::NewAlias,
         step: 0,
         name: String::new(),
-        shortcuts: String::new(),
-        shortcut: String::new(),
+        triggers: String::new(),
+        trigger: String::new(),
         linux: String::new(),
         macos: String::new(),
-        arg_key: String::new(),
-        arg_value: String::new(),
+        shortcut_key: String::new(),
+        shortcut_value: String::new(),
         input: String::new(),
         error: None,
     }
 }
 
-/// Start the add-argument wizard for `alias` (step 0 = key).
-pub fn new_arg(alias: &str) -> Form {
+/// Start the add-shortcut wizard for `alias` (step 0 = key, step 1 = value).
+pub fn new_shortcut(alias: &str) -> Form {
     Form {
-        purpose: Purpose::NewArg {
+        purpose: Purpose::NewShortcut {
             alias: alias.to_string(),
         },
         step: 0,
@@ -109,10 +113,10 @@ pub fn new_arg(alias: &str) -> Form {
     }
 }
 
-/// Start the add-shortcut wizard for `alias` (single step).
-pub fn new_shortcut(alias: &str) -> Form {
+/// Start the add-trigger wizard for `alias` (single step).
+pub fn new_trigger(alias: &str) -> Form {
     Form {
-        purpose: Purpose::NewShortcut {
+        purpose: Purpose::NewTrigger {
             alias: alias.to_string(),
         },
         step: 0,
@@ -141,8 +145,8 @@ pub fn new_edit_command(alias: &str, linux: Option<&str>, macos: Option<&str>) -
 pub fn step_count(f: &Form) -> usize {
     match f.purpose {
         Purpose::NewAlias => 4,
-        Purpose::NewArg { .. } => 2,
-        Purpose::NewShortcut { .. } => 1,
+        Purpose::NewShortcut { .. } => 2,
+        Purpose::NewTrigger { .. } => 1,
         Purpose::EditCommand { .. } => 2,
     }
 }
@@ -233,7 +237,7 @@ fn validate_step(f: &Form, store: &Store) -> Result<(), String> {
                     continue; // "a,,b" and a trailing comma are tolerated
                 }
                 if !alias::valid_ident(sc) {
-                    return Err(format!("invalid shortcut: {sc}"));
+                    return Err(format!("invalid trigger: {sc}"));
                 }
             }
             Ok(())
@@ -246,13 +250,21 @@ fn validate_step(f: &Form, store: &Store) -> Result<(), String> {
             }
         }
         (Purpose::NewAlias, 3) => Ok(()), // empty = same as linux
-        // One word, must be a valid identifier; collisions are reported by
-        // `alias::add_shortcut` (surfaced on the list's status line).
+        // One word per step: key (step 0) then value (step 1). Duplicate keys
+        // and unknown aliases are reported by `alias::set_shortcut` (surfaced
+        // on the list's status line).
         (Purpose::NewShortcut { .. }, 0) => {
             if value.is_empty() {
-                Err("shortcut cannot be empty".to_string())
-            } else if !alias::valid_ident(value) {
-                Err(format!("invalid shortcut: {value} (a-z 0-9 - _)"))
+                Err("shortcut key cannot be empty".to_string())
+            } else if value.contains(char::is_whitespace) {
+                Err("shortcut key must be one word".to_string())
+            } else {
+                Ok(())
+            }
+        }
+        (Purpose::NewShortcut { .. }, 1) => {
+            if value.is_empty() {
+                Err("shortcut value cannot be empty".to_string())
             } else {
                 Ok(())
             }
@@ -265,18 +277,13 @@ fn validate_step(f: &Form, store: &Store) -> Result<(), String> {
             }
         }
         (Purpose::EditCommand { .. }, 1) => Ok(()), // empty = same as linux
-        (Purpose::NewArg { .. }, 0) => {
+        // One trigger word, must be a valid identifier; collisions are
+        // reported by `alias::add_trigger` (surfaced on the status line).
+        (Purpose::NewTrigger { .. }, 0) => {
             if value.is_empty() {
-                Err("arg key cannot be empty".to_string())
-            } else if value.contains(char::is_whitespace) {
-                Err("arg key must be one word".to_string())
-            } else {
-                Ok(())
-            }
-        }
-        (Purpose::NewArg { .. }, 1) => {
-            if value.is_empty() {
-                Err("arg value cannot be empty".to_string())
+                Err("trigger cannot be empty".to_string())
+            } else if !alias::valid_ident(value) {
+                Err(format!("invalid trigger: {value} (a-z 0-9 - _)"))
             } else {
                 Ok(())
             }
@@ -288,14 +295,14 @@ fn validate_step(f: &Form, store: &Store) -> Result<(), String> {
 fn store_field(f: &mut Form, value: &str) {
     match (&f.purpose, f.step) {
         (Purpose::NewAlias, 0) => f.name = value.to_string(),
-        (Purpose::NewAlias, 1) => f.shortcuts = value.to_string(),
+        (Purpose::NewAlias, 1) => f.triggers = value.to_string(),
         (Purpose::NewAlias, 2) => f.linux = value.to_string(),
         (Purpose::NewAlias, 3) => f.macos = value.to_string(),
-        (Purpose::NewShortcut { .. }, 0) => f.shortcut = value.to_string(),
+        (Purpose::NewShortcut { .. }, 0) => f.shortcut_key = value.to_string(),
+        (Purpose::NewShortcut { .. }, 1) => f.shortcut_value = value.to_string(),
         (Purpose::EditCommand { .. }, 0) => f.linux = value.to_string(),
         (Purpose::EditCommand { .. }, 1) => f.macos = value.to_string(),
-        (Purpose::NewArg { .. }, 0) => f.arg_key = value.to_string(),
-        (Purpose::NewArg { .. }, 1) => f.arg_value = value.to_string(),
+        (Purpose::NewTrigger { .. }, 0) => f.trigger = value.to_string(),
         _ => {}
     }
 }
@@ -303,8 +310,8 @@ fn store_field(f: &mut Form, value: &str) {
 fn build_submission(f: &Form) -> Submission {
     match &f.purpose {
         Purpose::NewAlias => {
-            let shortcuts = f
-                .shortcuts
+            let triggers = f
+                .triggers
                 .split(',')
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -318,21 +325,21 @@ fn build_submission(f: &Form) -> Submission {
             };
             Submission::Alias(AliasDef {
                 name: f.name.clone(),
-                shortcuts,
+                triggers,
                 linux: Some(f.linux.clone()),
                 macos: Some(macos),
-                args: BTreeMap::new(),
+                shortcuts: BTreeMap::new(),
                 builtin: false,
             })
         }
-        Purpose::NewArg { alias } => Submission::Arg {
-            alias: alias.clone(),
-            key: f.arg_key.clone(),
-            value: f.arg_value.clone(),
-        },
         Purpose::NewShortcut { alias } => Submission::Shortcut {
             alias: alias.clone(),
-            shortcut: f.shortcut.clone(),
+            key: f.shortcut_key.clone(),
+            value: f.shortcut_value.clone(),
+        },
+        Purpose::NewTrigger { alias } => Submission::Trigger {
+            alias: alias.clone(),
+            trigger: f.trigger.clone(),
         },
         // A blank macos answer is left blank on purpose: `alias::set_commands`
         // mirrors linux for it, the single-platform rule.
@@ -416,10 +423,10 @@ mod tests {
         match out {
             FormOutcome::Submit(Submission::Alias(def)) => {
                 assert_eq!(def.name, "mytool");
-                assert_eq!(def.shortcuts, vec!["mt".to_string(), "my".to_string()]);
+                assert_eq!(def.triggers, vec!["mt".to_string(), "my".to_string()]);
                 assert_eq!(def.linux.as_deref(), Some("printf %s {input}"));
                 assert_eq!(def.macos.as_deref(), Some("printf %s {input}"));
-                assert!(def.args.is_empty());
+                assert!(def.shortcuts.is_empty());
                 assert!(!def.builtin);
             }
             other => panic!("expected Submit, got {other:?}"),
@@ -454,13 +461,13 @@ mod tests {
     }
 
     #[test]
-    fn new_arg_walks_key_then_value() {
+    fn new_shortcut_walks_key_then_value() {
         let mut store = empty_store();
         let mut def = crate::alias::defaults().remove(0);
         def.name = "t".to_string();
         store.aliases.push(def);
 
-        let f = new_arg("t");
+        let f = new_shortcut("t");
         assert_eq!(step_count(&f), 2);
         let f = type_str(&f, "baidu", &store);
         let (f, out) = enter(&f, &store);
@@ -468,15 +475,15 @@ mod tests {
         assert_eq!(f.step, 1);
 
         // multi-word keys are rejected inline
-        let bad = type_str(&new_arg("t"), "two words", &store);
+        let bad = type_str(&new_shortcut("t"), "two words", &store);
         let (bad, out) = enter(&bad, &store);
         assert_eq!(out, FormOutcome::Active);
-        assert_eq!(bad.error.as_deref(), Some("arg key must be one word"));
+        assert_eq!(bad.error.as_deref(), Some("shortcut key must be one word"));
 
         let f = type_str(&f, "https://www.baidu.com", &store);
         let (_, out) = enter(&f, &store);
         match out {
-            FormOutcome::Submit(Submission::Arg { alias, key, value }) => {
+            FormOutcome::Submit(Submission::Shortcut { alias, key, value }) => {
                 assert_eq!(
                     (alias.as_str(), key.as_str(), value.as_str()),
                     ("t", "baidu", "https://www.baidu.com")
@@ -487,26 +494,26 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_wizard_is_one_step_and_validates() {
+    fn trigger_wizard_is_one_step_and_validates() {
         let store = empty_store();
-        let f = new_shortcut("t");
+        let f = new_trigger("t");
         assert_eq!(step_count(&f), 1);
         assert_eq!(f.input, "");
 
         // empty and malformed answers stay on the (only) step
-        let (f, out) = enter(&new_shortcut("t"), &store);
+        let (f, out) = enter(&new_trigger("t"), &store);
         assert_eq!(out, FormOutcome::Active);
-        assert_eq!(f.error.as_deref(), Some("shortcut cannot be empty"));
-        let bad = type_str(&new_shortcut("t"), "bad!", &store);
+        assert_eq!(f.error.as_deref(), Some("trigger cannot be empty"));
+        let bad = type_str(&new_trigger("t"), "bad!", &store);
         let (bad, out) = enter(&bad, &store);
         assert_eq!(out, FormOutcome::Active);
-        assert!(bad.error.unwrap().contains("invalid shortcut"));
+        assert!(bad.error.unwrap().contains("invalid trigger"));
 
-        let f = type_str(&new_shortcut("t"), "gc", &store);
+        let f = type_str(&new_trigger("t"), "gc", &store);
         let (f, out) = enter(&f, &store);
         match out {
-            FormOutcome::Submit(Submission::Shortcut { alias, shortcut }) => {
-                assert_eq!((alias.as_str(), shortcut.as_str()), ("t", "gc"));
+            FormOutcome::Submit(Submission::Trigger { alias, trigger }) => {
+                assert_eq!((alias.as_str(), trigger.as_str()), ("t", "gc"));
             }
             other => panic!("expected Submit, got {other:?}"),
         }

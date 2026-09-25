@@ -23,17 +23,18 @@ pub fn execute(app: &mut App, platform: Platform, path: &Path) {
     let head = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim().to_string();
 
-    // 1. "<alias> <args>": a resolving head wins; `rest` is the input, except
-    //    when the cursor sits on one of that alias's named-arg rows (`br b`).
-    // 2. Otherwise the selected candidate decides (alias => whole input,
-    //    history => recorded alias + input). Errors surface as a status line.
+    // 1. "<alias> <shortcut>": a resolving head wins; `rest` is the input,
+    //    except when the cursor sits on one of that alias's shortcut rows.
+    // 2. Otherwise the selected candidate decides (shortcut => its key, mapped
+    //    at run time; history => recorded alias + input). Errors surface as a
+    //    status line.
     // The def is cloned so the borrow of `app` ends before we mutate the store.
     let target: Result<(AliasDef, String), String> = match alias::resolve(&app.aliases, head) {
-        Some(def) => match arg_override(app, def, &rest) {
+        Some(def) => match shortcut_override(app, def, &rest) {
             Some(key) => Ok((def.clone(), key)),
             None => Ok((def.clone(), rest)),
         },
-        None => selected_target(app, &trimmed),
+        None => selected_target(app),
     };
     let (def, input) = match target {
         Ok(t) => t,
@@ -43,9 +44,9 @@ pub fn execute(app: &mut App, platform: Platform, path: &Path) {
         }
     };
 
-    // Named args (`br baidu`): the command sees the mapped value, while
-    // history keeps the raw text so the shorthand stays replayable.
-    let run_input = exec::resolve_args(&def, &input);
+    // Registered shortcuts (`br baidu`): the command sees the mapped value,
+    // while history keeps the raw text so the shorthand stays replayable.
+    let run_input = exec::resolve_shortcuts(&def, &input);
 
     match exec::run_alias(&def, &run_input, platform) {
         ExecOutcome::Success(_) => {
@@ -77,33 +78,33 @@ pub fn execute(app: &mut App, platform: Platform, path: &Path) {
     }
 }
 
-/// Head resolved but `rest` is not an exact key: the highlighted named-arg row
+/// Head resolved but `rest` is not an exact key: the highlighted shortcut row
 /// decides, so Up/Down + Enter works for the `br b` picker flow.
-fn arg_override(app: &App, def: &AliasDef, rest: &str) -> Option<String> {
-    if def.args.contains_key(rest.trim()) {
+fn shortcut_override(app: &App, def: &AliasDef, rest: &str) -> Option<String> {
+    if def.shortcuts.contains_key(rest.trim()) {
         return None;
     }
     match state::selected(app) {
-        // The arg KEY travels on as the input, so `exec::resolve_args` maps it
-        // and history keeps the replayable shorthand (`br baidu`, not a URL).
-        Some(Candidate::Arg { alias, key }) if alias.eq_ignore_ascii_case(&def.name) => Some(key),
+        // The shortcut KEY travels on as the input, so
+        // `exec::resolve_shortcuts` maps it and history keeps the replayable
+        // shorthand (`br baidu`, not a URL).
+        Some(Candidate::Shortcut { alias, key }) if alias.eq_ignore_ascii_case(&def.name) => {
+            Some(key)
+        }
         _ => None,
     }
 }
 
 /// Target resolution via the selected candidate. `Err` carries the message
 /// for the status line (no match / dangling alias name).
-fn selected_target(app: &App, trimmed: &str) -> Result<(AliasDef, String), String> {
+fn selected_target(app: &App) -> Result<(AliasDef, String), String> {
     match state::selected(app) {
-        Some(Candidate::Alias { name }) => match alias::resolve(&app.aliases, &name) {
-            Some(def) => Ok((def.clone(), trimmed.to_string())),
-            None => Err(format!("alias not found: {name}")),
-        },
-        Some(Candidate::Arg { alias, key }) => match alias::resolve(&app.aliases, &alias) {
-            Some(def) => match def.args.get(&key) {
-                Some(value) => Ok((def.clone(), value.clone())),
-                None => Err(format!("named arg not found: {key}")),
-            },
+        // The shortcut KEY travels on as the input (mirroring
+        // `shortcut_override`), so `exec::resolve_shortcuts` maps it and
+        // history keeps the replayable shorthand (`br baidu`, not a URL).
+        Some(Candidate::Shortcut { alias, key }) => match alias::resolve(&app.aliases, &alias) {
+            Some(def) if def.shortcuts.contains_key(&key) => Ok((def.clone(), key)),
+            Some(_) => Err(format!("shortcut not found: {key}")),
             None => Err(format!("alias not found: {alias}")),
         },
         Some(Candidate::History { idx }) => match app.store.history.get(idx) {
@@ -206,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn highlighted_arg_row_runs_for_a_typed_partial() {
+    fn highlighted_shortcut_row_runs_for_a_typed_partial() {
         let (mut app, _dir, path) = setup();
         shown(&mut app);
         type_str(&mut app, ":add t,tt printf %s {input}", &path);
@@ -216,8 +217,8 @@ mod tests {
         type_str(&mut app, ":arg t bing https://example.com/i", &path);
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
 
-        // "t b" lists both args: Enter runs the highlighted one, not the
-        // literal partial.
+        // "t b" lists both shortcuts: Enter runs the highlighted one, not
+        // the literal partial.
         app.input = "t b".to_string();
         app.cursor = 0;
         apply(&mut app, Action::Execute, Platform::Linux, &path);
@@ -228,7 +229,7 @@ mod tests {
         // History keeps the raw key so the shorthand stays replayable.
         assert_eq!(app.store.history[0].input(), "baidu");
 
-        // Moving the highlight down picks the other arg.
+        // Moving the highlight down picks the other shortcut.
         app.input = "t b".to_string();
         apply(&mut app, Action::MoveDown, Platform::Linux, &path);
         apply(&mut app, Action::Execute, Platform::Linux, &path);
@@ -239,7 +240,30 @@ mod tests {
     }
 
     #[test]
-    fn an_exactly_typed_arg_key_keeps_its_own_meaning() {
+    fn selected_shortcut_row_records_the_key_not_the_value() {
+        let (mut app, _dir, path) = setup();
+        shown(&mut app);
+        type_str(&mut app, ":add t,tt printf %s {input}", &path);
+        apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
+        type_str(&mut app, ":arg t baidu https://example.com/b", &path);
+        apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
+
+        // "baidu" does not resolve as a head (it is a shortcut key, not a
+        // trigger): the highlighted row decides and runs the mapped value...
+        app.input = "baidu".to_string();
+        app.cursor = 0;
+        apply(&mut app, Action::Execute, Platform::Linux, &path);
+        assert_eq!(
+            app.status,
+            Some((true, "t ok: https://example.com/b".to_string()))
+        );
+        // ...while history keeps the shorthand, exactly like the
+        // resolving-head picker path.
+        assert_eq!(app.store.history[0].input(), "baidu");
+    }
+
+    #[test]
+    fn an_exactly_typed_shortcut_key_keeps_its_own_meaning() {
         let (mut app, _dir, path) = setup();
         shown(&mut app);
         type_str(&mut app, ":add t,tt printf %s {input}", &path);
@@ -253,7 +277,7 @@ mod tests {
         let def = alias::resolve(&app.aliases, "t").expect("t resolves");
         // A cursor parked on another row must not change what `t baidu` does.
         app.cursor = 1;
-        assert_eq!(arg_override(&app, def, "baidu"), None);
+        assert_eq!(shortcut_override(&app, def, "baidu"), None);
         apply(&mut app, Action::Execute, Platform::Linux, &path);
         assert_eq!(
             app.status,

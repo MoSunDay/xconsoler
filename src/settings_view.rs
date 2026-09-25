@@ -1,6 +1,6 @@
 //! Rendering for the `/settings` page: a full-screen alias table
-//! (`name | shortcuts | linux | macos | args`) with expandable quick-launch
-//! entry rows and the wizard's bottom input line.
+//! (`name | triggers | linux | macos | shortcuts`) with expandable
+//! trigger/shortcut rows and the wizard's bottom input line.
 //!
 //! Text-only layout (no Table widget): each row is styled segments laid on
 //! one line, reusing the truncation/selection helpers from `crate::render`.
@@ -28,7 +28,7 @@ const HINT_SEGMENTS: [&str; 9] = [
     "n new alias",
     "e edit cmds",
     "s add shortcut",
-    "a add arg",
+    "t add trigger",
     "d delete",
     "q/Esc back",
 ];
@@ -86,10 +86,8 @@ fn form_title(f: &Form) -> String {
     let n = settings_form::step_count(f);
     match &f.purpose {
         Purpose::NewAlias => format!("new alias ({}/{})", f.step + 1, n),
-        Purpose::NewArg { alias } => format!("new arg for '{alias}' ({}/{})", f.step + 1, n),
-        Purpose::NewShortcut { alias } => {
-            format!("new shortcut for '{alias}' ({}/{})", f.step + 1, n)
-        }
+        Purpose::NewShortcut { .. } => format!("new shortcut ({}/{})", f.step + 1, n),
+        Purpose::NewTrigger { .. } => format!("new trigger ({}/{})", f.step + 1, n),
         Purpose::EditCommand { alias } => {
             format!("edit commands for '{alias}' ({}/{})", f.step + 1, n)
         }
@@ -100,12 +98,14 @@ fn form_title(f: &Form) -> String {
 fn form_prompt(f: &Form) -> String {
     match (&f.purpose, f.step) {
         (Purpose::NewAlias, 0) => "name".to_string(),
-        (Purpose::NewAlias, 1) => "shortcuts (comma-separated, empty ok)".to_string(),
+        (Purpose::NewAlias, 1) => "triggers (comma-separated, empty ok)".to_string(),
         (Purpose::NewAlias, 2) => "linux command — use {input} where the input goes".to_string(),
         (Purpose::NewAlias, 3) => "macos command (empty = same as linux)".to_string(),
-        (Purpose::NewArg { alias }, 0) => format!("arg key for '{alias}' (one word)"),
-        (Purpose::NewArg { .. }, 1) => "arg value (spaces allowed)".to_string(),
-        (Purpose::NewShortcut { .. }, 0) => "shortcut (one word, a-z 0-9 - _)".to_string(),
+        (Purpose::NewShortcut { alias }, 0) => {
+            format!("shortcut key for '{alias}' (one word)")
+        }
+        (Purpose::NewShortcut { .. }, 1) => "shortcut value (spaces allowed)".to_string(),
+        (Purpose::NewTrigger { .. }, 0) => "trigger (one word, a-z 0-9 - _)".to_string(),
         (Purpose::EditCommand { .. }, 0) => {
             "linux command — use {input} where the input goes".to_string()
         }
@@ -135,8 +135,8 @@ pub fn draw(f: &mut Frame, st: &Settings, aliases: &[AliasDef]) {
     let mut lines: Vec<Line> = Vec::new();
     let (name_w, sc_w) = column_widths(aliases, width);
     // linux and macos share the leftover width (fixed overhead: 4 gaps of 2
-    // chars + the "args" header). Command text is truncated to this.
-    let cmd_w = width.saturating_sub(name_w + sc_w + 12) / 2;
+    // chars + the "shortcuts" header). Command text is truncated to this.
+    let cmd_w = width.saturating_sub(name_w + sc_w + 17) / 2;
     lines.push(header_line(name_w, sc_w, cmd_w));
 
     // scroll window keeping the cursor visible
@@ -153,8 +153,8 @@ pub fn draw(f: &mut Frame, st: &Settings, aliases: &[AliasDef]) {
         let selected = i == st.cursor;
         let segs = match row {
             Row::Alias { idx } => alias_segments(aliases, *idx, name_w, sc_w, cmd_w),
-            Row::Shortcut { alias, idx } => shortcut_segments(aliases, *alias, *idx, width),
-            Row::Arg { alias, key } => arg_segments(aliases, *alias, key, width),
+            Row::Trigger { alias, idx } => trigger_segments(aliases, *alias, *idx, width),
+            Row::Shortcut { alias, key } => shortcut_segments(aliases, *alias, key, width),
         };
         lines.push(segments_line(segs, width, selected, sel_style));
     }
@@ -194,7 +194,7 @@ pub fn draw(f: &mut Frame, st: &Settings, aliases: &[AliasDef]) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-/// (name, shortcuts) column widths from the data, capped so the command
+/// (name, triggers) column widths from the data, capped so the command
 /// column keeps most of the line.
 fn column_widths(aliases: &[AliasDef], width: usize) -> (usize, usize) {
     let name_w = aliases
@@ -207,7 +207,7 @@ fn column_widths(aliases: &[AliasDef], width: usize) -> (usize, usize) {
         .min(width / 3);
     let sc_w = aliases
         .iter()
-        .map(|d| d.shortcuts.join(",").chars().count())
+        .map(|d| d.triggers.join(",").chars().count())
         .chain([9])
         .max()
         .unwrap_or(9)
@@ -219,9 +219,9 @@ fn column_widths(aliases: &[AliasDef], width: usize) -> (usize, usize) {
 fn header_line(name_w: usize, sc_w: usize, cmd_w: usize) -> Line<'static> {
     Line::from(Span::styled(
         format!(
-            "{:<nw$}  {:<sw$}  {:<lw$}  {:<mw$}  args",
+            "{:<nw$}  {:<sw$}  {:<lw$}  {:<mw$}  shortcuts",
             "name",
-            "shortcuts",
+            "triggers",
             "linux",
             "macos",
             nw = name_w,
@@ -246,7 +246,7 @@ fn alias_segments(
         Some(d) => vec![
             (pad(&d.name, name_w), Style::new().fg(ACCENT)),
             ("  ".to_string(), Style::new()),
-            (pad(&d.shortcuts.join(","), sc_w), Style::new().fg(SUBTLE)),
+            (pad(&d.triggers.join(","), sc_w), Style::new().fg(SUBTLE)),
             ("  ".to_string(), Style::new()),
             (
                 // truncate then pad: both command columns stay aligned even
@@ -262,27 +262,27 @@ fn alias_segments(
                 Style::new().fg(SUBTLE),
             ),
             ("  ".to_string(), Style::new()),
-            (d.args.len().to_string(), Style::new().fg(MUTED)),
+            (d.shortcuts.len().to_string(), Style::new().fg(MUTED)),
         ],
         None => vec![("…".to_string(), Style::new().fg(MUTED))],
     }
 }
 
-/// Indented shortcut row under the expanded alias: `↳ shortcut: gc`.
-fn shortcut_segments(aliases: &[AliasDef], alias: usize, idx: usize, width: usize) -> Segs {
-    let shortcut = aliases
+/// Indented trigger row under the expanded alias: `↳ trigger: tt`.
+fn trigger_segments(aliases: &[AliasDef], alias: usize, idx: usize, width: usize) -> Segs {
+    let trigger = aliases
         .get(alias)
-        .and_then(|d| d.shortcuts.get(idx).cloned())
+        .and_then(|d| d.triggers.get(idx).cloned())
         .unwrap_or_else(|| "…".to_string());
-    let text = format!("  ↳ shortcut: {shortcut}");
+    let text = format!("  ↳ trigger: {trigger}");
     vec![(truncate(&text, width), Style::new().fg(ACCENT))]
 }
 
-/// Indented `key → value` row under the expanded alias.
-fn arg_segments(aliases: &[AliasDef], alias: usize, key: &str, width: usize) -> Segs {
+/// Indented `key → value` concrete shortcut row under the expanded alias.
+fn shortcut_segments(aliases: &[AliasDef], alias: usize, key: &str, width: usize) -> Segs {
     let value = aliases
         .get(alias)
-        .and_then(|d| d.args.get(key).cloned())
+        .and_then(|d| d.shortcuts.get(key).cloned())
         .unwrap_or_else(|| "…".to_string());
     let text = format!("  {key} → {value}");
     vec![(truncate(&text, width), Style::new().fg(SUBTLE))]
@@ -358,10 +358,10 @@ mod tests {
         let mut store = Store::default();
         store.aliases.push(AliasDef {
             name: "t".to_string(),
-            shortcuts: vec!["tt".to_string()],
+            triggers: vec!["tt".to_string()],
             linux: Some("printf %s {input}".to_string()),
             macos: Some("printf %s {input}".to_string()),
-            args: [("baidu".to_string(), "https://www.baidu.com".to_string())]
+            shortcuts: [("baidu".to_string(), "https://www.baidu.com".to_string())]
                 .into_iter()
                 .collect(),
             builtin: false,
@@ -375,10 +375,10 @@ mod tests {
         let mut store = Store::default();
         store.aliases.push(AliasDef {
             name: "f".to_string(),
-            shortcuts: vec![],
+            triggers: vec![],
             linux: Some("ls".to_string()),
             macos: Some("open -a Finder".to_string()),
-            args: Default::default(),
+            shortcuts: Default::default(),
             builtin: false,
         });
         let aliases = settings::view(&store);
@@ -420,7 +420,7 @@ mod tests {
             "n new alias",
             "e edit cmds",
             "s add shortcut",
-            "a add arg",
+            "t add trigger",
             "d delete",
             "q/Esc back",
         ] {
@@ -498,10 +498,10 @@ mod tests {
         let (_store, aliases) = t_store();
         let text = draw_wide(&settings::new(), &aliases);
         assert!(text.contains("name"));
-        assert!(text.contains("shortcuts"));
+        assert!(text.contains("triggers"));
         assert!(text.contains("linux"));
         assert!(text.contains("macos"));
-        assert!(text.contains("args"));
+        assert!(text.contains("shortcuts"));
         // t has an explicit macos command, shown next to its linux one
         // t's row carries the same command in both command columns
         let row = text
@@ -516,10 +516,10 @@ mod tests {
         let mut store = Store::default();
         store.aliases.push(AliasDef {
             name: "t".to_string(),
-            shortcuts: vec![],
+            triggers: vec![],
             linux: Some("printf %s {input}".to_string()),
             macos: None,
-            args: Default::default(),
+            shortcuts: Default::default(),
             builtin: false,
         });
         let aliases = settings::view(&store);
@@ -537,10 +537,10 @@ mod tests {
         let mut store = Store::default();
         store.aliases.push(AliasDef {
             name: "t".to_string(),
-            shortcuts: vec![],
+            triggers: vec![],
             linux: Some(long.clone()),
             macos: Some(long.clone()),
-            args: Default::default(),
+            shortcuts: Default::default(),
             builtin: false,
         });
         let aliases = settings::view(&store);
@@ -550,17 +550,17 @@ mod tests {
     }
 
     #[test]
-    fn expanded_alias_lists_shortcut_rows() {
+    fn expanded_alias_lists_trigger_rows() {
         let (_store, aliases) = t_store();
         let mut st = settings::new();
         st.cursor = 2;
         st.expanded = Some(2);
         let text = draw_once(&st, &aliases);
-        assert!(text.contains("↳ shortcut: tt"));
+        assert!(text.contains("↳ trigger: tt"));
     }
 
     #[test]
-    fn expanded_alias_shows_indented_args() {
+    fn expanded_alias_shows_indented_shortcuts() {
         let (_store, aliases) = t_store();
         let mut st = settings::new();
         st.cursor = 2;
@@ -598,13 +598,30 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_form_shows_the_one_step_title() {
+    fn shortcut_form_shows_the_key_then_value_steps() {
         let (_store, aliases) = t_store();
         let mut st = settings::new();
-        st.form = Some(settings_form::new_shortcut("t"));
+        let mut form = settings_form::new_shortcut("t");
+        st.form = Some(form.clone());
         let text = draw_wide(&st, &aliases);
-        assert!(text.contains("new shortcut for 't' (1/1)"));
-        assert!(text.contains("shortcut (one word"));
+        assert!(text.contains("new shortcut (1/2)"));
+        assert!(text.contains("shortcut key for 't' (one word)"));
+
+        form.step = 1;
+        st.form = Some(form);
+        let text = draw_wide(&st, &aliases);
+        assert!(text.contains("new shortcut (2/2)"));
+        assert!(text.contains("shortcut value (spaces allowed)"));
+    }
+
+    #[test]
+    fn trigger_form_shows_the_one_step_title() {
+        let (_store, aliases) = t_store();
+        let mut st = settings::new();
+        st.form = Some(settings_form::new_trigger("t"));
+        let text = draw_wide(&st, &aliases);
+        assert!(text.contains("new trigger (1/1)"));
+        assert!(text.contains("trigger (one word"));
     }
 
     #[test]

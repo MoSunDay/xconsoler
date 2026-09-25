@@ -30,24 +30,26 @@ pub fn apply_effect(store: &mut Store, effect: &Effect) -> Option<Result<String,
             }
             Some(Ok(format!("alias added: {label}")))
         }
-        Effect::SetArg { alias, key, value } => Some(
-            match alias::set_arg(&mut store.aliases, alias, key, value) {
-                Ok(Some(_)) => Ok(format!("arg set: {alias}.{key} (replaced previous value)")),
-                Ok(None) => Ok(format!("arg set: {alias}.{key} = {value}")),
+        Effect::SetShortcut { alias, key, value } => Some(
+            match alias::set_shortcut(&mut store.aliases, alias, key, value) {
+                Ok(Some(_)) => Ok(format!(
+                    "shortcut set: {alias}.{key} (replaced previous value)"
+                )),
+                Ok(None) => Ok(format!("shortcut set: {alias}.{key} = {value}")),
                 Err(e) => Err(e),
             },
         ),
-        Effect::AddShortcut { alias, shortcut } => Some(
-            match alias::add_shortcut(&mut store.aliases, alias, shortcut) {
-                Ok(true) => Ok(format!("shortcut added: {alias} ({shortcut})")),
-                Ok(false) => Ok(format!("shortcut already on {alias}: {shortcut}")),
+        Effect::AddTrigger { alias, trigger } => Some(
+            match alias::add_trigger(&mut store.aliases, alias, trigger) {
+                Ok(true) => Ok(format!("trigger added: {alias} ({trigger})")),
+                Ok(false) => Ok(format!("trigger already on {alias}: {trigger}")),
                 Err(e) => Err(e),
             },
         ),
-        Effect::RemoveShortcut { alias, shortcut } => Some(
-            match alias::remove_shortcut(&mut store.aliases, alias, shortcut) {
-                Ok(true) => Ok(format!("shortcut removed: {alias} ({shortcut})")),
-                Ok(false) => Err(format!("shortcut not found on {alias}: {shortcut}")),
+        Effect::RemoveTrigger { alias, trigger } => Some(
+            match alias::remove_trigger(&mut store.aliases, alias, trigger) {
+                Ok(true) => Ok(format!("trigger removed: {alias} ({trigger})")),
+                Ok(false) => Err(format!("trigger not found on {alias}: {trigger}")),
                 Err(e) => Err(e),
             },
         ),
@@ -104,9 +106,9 @@ pub fn apply(app: &mut App, key: KeyEvent, path: &Path) {
         Effect::Quit => app.quit = true,
         // `resolve` turned every data-carrying effect into Save / None.
         Effect::AddAlias(_)
-        | Effect::SetArg { .. }
-        | Effect::AddShortcut { .. }
-        | Effect::RemoveShortcut { .. }
+        | Effect::SetShortcut { .. }
+        | Effect::AddTrigger { .. }
+        | Effect::RemoveTrigger { .. }
         | Effect::SetCommands { .. } => app.mode = Mode::Settings(Box::new(st)),
     }
 }
@@ -175,10 +177,15 @@ mod tests {
 
         apply(&mut app, key(KeyCode::Char('s')), &bad);
         type_str(&mut app, "gc", &bad);
+        apply(&mut app, key(KeyCode::Enter), &bad); // key -> value step
+        type_str(&mut app, "git clone {input}", &bad);
         apply(&mut app, key(KeyCode::Enter), &bad);
 
         // The edit happened in memory, but the status says the save failed.
-        assert_eq!(app.store.aliases[0].shortcuts, vec!["gc".to_string()]);
+        assert_eq!(
+            app.store.aliases[0].shortcuts.get("gc").map(String::as_str),
+            Some("git clone {input}")
+        );
         let (ok, msg) = status(&app).expect("a status line");
         assert!(!ok, "a failed save must not look like success");
         assert!(msg.starts_with("save failed:"), "got {msg}");
@@ -190,32 +197,34 @@ mod tests {
         apply(&mut app, key(KeyCode::Char('s')), &path);
         assert!(form_open(&app), "`s` opens the shortcut wizard");
         type_str(&mut app, "gc", &path);
+        apply(&mut app, key(KeyCode::Enter), &path); // key -> value step
+        type_str(&mut app, "git clone {input}", &path);
         apply(&mut app, key(KeyCode::Enter), &path);
 
         let def = app.store.aliases.first().expect("br materialised");
         assert_eq!(def.name, "br");
         assert!(!def.builtin, "a builtin override, like :arg does");
-        assert_eq!(def.shortcuts, vec!["gc".to_string()]);
-        assert!(status(&app).is_some_and(|(ok, m)| ok && m.contains("shortcut added")));
+        assert_eq!(
+            def.shortcuts.get("gc").map(String::as_str),
+            Some("git clone {input}")
+        );
+        assert!(status(&app).is_some_and(|(ok, m)| ok && m.contains("shortcut set")));
         assert!(!form_open(&app), "the wizard closed");
-        assert!(app
-            .aliases
-            .iter()
-            .any(|d| d.shortcuts == vec!["gc".to_string()]));
+        assert!(app.aliases.iter().any(|d| d.shortcuts.contains_key("gc")));
 
         let reloaded = storage::load(&path);
         assert_eq!(
-            reloaded.aliases[0].shortcuts,
-            vec!["gc".to_string()],
+            reloaded.aliases[0].shortcuts.get("gc").map(String::as_str),
+            Some("git clone {input}"),
             "same save path as the other edits"
         );
     }
 
     #[test]
-    fn shortcut_collision_lands_on_the_status_line() {
+    fn trigger_collision_lands_on_the_status_line() {
         let (mut app, _dir, path) = setup();
-        // `cd` already answers to `cd`, so add_shortcut refuses
-        apply(&mut app, key(KeyCode::Char('s')), &path);
+        // `cd` already answers to `cd`, so add_trigger refuses
+        apply(&mut app, key(KeyCode::Char('t')), &path);
         type_str(&mut app, "cd", &path);
         apply(&mut app, key(KeyCode::Enter), &path);
 
@@ -276,28 +285,48 @@ mod tests {
         let (mut app, _dir, path) = setup();
         apply(&mut app, key(KeyCode::Char('s')), &path);
         type_str(&mut app, "gc", &path);
+        apply(&mut app, key(KeyCode::Enter), &path); // key -> value step
+        type_str(&mut app, "git clone {input}", &path);
         apply(&mut app, key(KeyCode::Enter), &path);
 
         apply(&mut app, key(KeyCode::Enter), &path); // expand br
-        apply(&mut app, key(KeyCode::Down), &path); // onto the shortcut row
+        apply(&mut app, key(KeyCode::Down), &path); // baidu shortcut row
+        apply(&mut app, key(KeyCode::Down), &path); // gc shortcut row
         apply(&mut app, key(KeyCode::Char('d')), &path);
 
-        assert!(app.store.aliases[0].shortcuts.is_empty());
+        assert!(!app.store.aliases[0].shortcuts.contains_key("gc"));
+        assert!(app.store.aliases[0].shortcuts.contains_key("baidu"));
         assert!(status(&app).is_some_and(|(ok, m)| ok && m.contains("shortcut removed")));
-        assert!(storage::load(&path).aliases[0].shortcuts.is_empty());
+        assert!(!storage::load(&path).aliases[0].shortcuts.contains_key("gc"));
     }
 
     #[test]
-    fn remove_shortcut_of_a_missing_entry_reports_an_error() {
+    fn d_on_a_trigger_row_removes_and_saves_it() {
+        let (mut app, _dir, path) = setup();
+        apply(&mut app, key(KeyCode::Char('t')), &path);
+        type_str(&mut app, "tt", &path);
+        apply(&mut app, key(KeyCode::Enter), &path);
+
+        apply(&mut app, key(KeyCode::Enter), &path); // expand br
+        apply(&mut app, key(KeyCode::Down), &path); // trigger row
+        apply(&mut app, key(KeyCode::Char('d')), &path);
+
+        assert!(app.store.aliases[0].triggers.is_empty());
+        assert!(status(&app).is_some_and(|(ok, m)| ok && m.contains("trigger removed")));
+        assert!(storage::load(&path).aliases[0].triggers.is_empty());
+    }
+
+    #[test]
+    fn remove_trigger_of_a_missing_entry_reports_an_error() {
         let mut store = Store::default();
         let out = apply_effect(
             &mut store,
-            &Effect::RemoveShortcut {
+            &Effect::RemoveTrigger {
                 alias: "br".to_string(),
-                shortcut: "nope".to_string(),
+                trigger: "nope".to_string(),
             },
         );
-        assert!(out.unwrap().is_err(), "unknown shortcut is refused");
+        assert!(out.unwrap().is_err(), "unknown trigger is refused");
         assert!(store.aliases.is_empty(), "nothing was materialised");
     }
 
@@ -316,27 +345,73 @@ mod tests {
     }
 
     #[test]
-    fn add_alias_and_set_arg_keep_their_messages() {
+    fn add_alias_and_set_shortcut_keep_their_messages() {
         let mut store = Store::default();
         let def = crate::alias::AliasDef {
             name: "t".to_string(),
-            shortcuts: vec![],
+            triggers: vec![],
             linux: Some("printf %s {input}".to_string()),
             macos: Some("printf %s {input}".to_string()),
-            args: Default::default(),
+            shortcuts: Default::default(),
             builtin: false,
         };
         let out = apply_effect(&mut store, &Effect::AddAlias(def)).unwrap();
         assert_eq!(out.unwrap(), "alias added: t");
         let out = apply_effect(
             &mut store,
-            &Effect::SetArg {
+            &Effect::SetShortcut {
                 alias: "t".to_string(),
                 key: "here".to_string(),
                 value: "cd /tmp".to_string(),
             },
         )
         .unwrap();
-        assert_eq!(out.unwrap(), "arg set: t.here = cd /tmp");
+        assert_eq!(out.unwrap(), "shortcut set: t.here = cd /tmp");
+        let out = apply_effect(
+            &mut store,
+            &Effect::SetShortcut {
+                alias: "t".to_string(),
+                key: "here".to_string(),
+                value: "cd /var".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            out.unwrap(),
+            "shortcut set: t.here (replaced previous value)"
+        );
+    }
+
+    #[test]
+    fn add_and_remove_trigger_report_their_messages() {
+        let mut store = Store::default();
+        let out = apply_effect(
+            &mut store,
+            &Effect::AddTrigger {
+                alias: "br".to_string(),
+                trigger: "tt".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out.unwrap(), "trigger added: br (tt)");
+        // Adding the same word again is a no-op, not an error.
+        let out = apply_effect(
+            &mut store,
+            &Effect::AddTrigger {
+                alias: "br".to_string(),
+                trigger: "TT".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out.unwrap(), "trigger already on br: TT");
+        let out = apply_effect(
+            &mut store,
+            &Effect::RemoveTrigger {
+                alias: "br".to_string(),
+                trigger: "tt".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out.unwrap(), "trigger removed: br (tt)");
     }
 }

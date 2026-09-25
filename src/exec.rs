@@ -60,16 +60,17 @@ pub fn shell_quote(s: &str) -> String {
     out
 }
 
-/// Resolve **named arguments** in `rest`, the input after the alias trigger
-/// word.
+/// Resolve **registered shortcuts** in `rest`, the input after the alias
+/// trigger word.
 ///
-/// If the first whitespace-separated token of `rest` is a key of `def.args`,
-/// that token is replaced by the mapped value and the remaining tokens are
-/// appended after it (`br baidu -incognito` → `https://baidu.com -incognito`
-/// when `baidu` maps to the URL). Otherwise — no key match, no args at all,
-/// empty rest, or a whitespace-only value — the trimmed `rest` is returned
-/// unchanged, so aliases without named args behave exactly as before.
-pub fn resolve_args(def: &AliasDef, rest: &str) -> String {
+/// If the first whitespace-separated token of `rest` is a key of
+/// `def.shortcuts`, that token is replaced by the mapped value and the
+/// remaining tokens are appended after it (`br baidu -incognito` →
+/// `https://baidu.com -incognito` when `baidu` maps to the URL). Otherwise —
+/// no key match, no shortcuts at all, empty rest, or a whitespace-only value —
+/// the trimmed `rest` is returned unchanged, so aliases without registered
+/// shortcuts behave exactly as before.
+pub fn resolve_shortcuts(def: &AliasDef, rest: &str) -> String {
     let trimmed = rest.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -77,7 +78,7 @@ pub fn resolve_args(def: &AliasDef, rest: &str) -> String {
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let head = parts.next().unwrap_or("");
     let tail = parts.next().unwrap_or("").trim();
-    match def.args.get(head) {
+    match def.shortcuts.get(head) {
         Some(value) if !value.trim().is_empty() => {
             let mut out = value.trim().to_string();
             if !tail.is_empty() {
@@ -222,10 +223,10 @@ mod tests {
     fn def(name: &str, linux: &str) -> AliasDef {
         AliasDef {
             name: name.to_string(),
-            shortcuts: vec![],
+            triggers: vec![],
             linux: Some(linux.to_string()),
             macos: None,
-            args: BTreeMap::new(),
+            shortcuts: BTreeMap::new(),
             builtin: false,
         }
     }
@@ -238,79 +239,85 @@ mod tests {
         assert_eq!(shell_quote("a b'c"), "'a b'\\''c'");
     }
 
-    fn def_with_args(name: &str, linux: &str, args: &[(&str, &str)]) -> AliasDef {
+    fn def_with_shortcuts(name: &str, linux: &str, args: &[(&str, &str)]) -> AliasDef {
         let mut d = def(name, linux);
         for (k, v) in args {
-            d.args.insert(k.to_string(), v.to_string());
+            d.shortcuts.insert(k.to_string(), v.to_string());
         }
         d
     }
 
     #[test]
-    fn resolve_args_without_args_returns_trimmed_rest() {
+    fn resolve_shortcuts_without_args_returns_trimmed_rest() {
         let d = def("t", "printf %s {input}");
-        assert_eq!(resolve_args(&d, "hello world"), "hello world");
-        assert_eq!(resolve_args(&d, "  spaced  "), "spaced");
+        assert_eq!(resolve_shortcuts(&d, "hello world"), "hello world");
+        assert_eq!(resolve_shortcuts(&d, "  spaced  "), "spaced");
     }
 
     #[test]
-    fn resolve_args_replaces_matching_key() {
-        let d = def_with_args(
+    fn resolve_shortcuts_replaces_matching_key() {
+        let d = def_with_shortcuts(
             "br",
             "xdg-open {input}",
             &[("baidu", "https://www.baidu.com")],
         );
-        assert_eq!(resolve_args(&d, "baidu"), "https://www.baidu.com");
+        assert_eq!(resolve_shortcuts(&d, "baidu"), "https://www.baidu.com");
         // surrounding whitespace is trimmed before the lookup
-        assert_eq!(resolve_args(&d, "   baidu   "), "https://www.baidu.com");
+        assert_eq!(
+            resolve_shortcuts(&d, "   baidu   "),
+            "https://www.baidu.com"
+        );
     }
 
     #[test]
-    fn resolve_args_appends_remaining_tokens_after_value() {
-        let d = def_with_args(
+    fn resolve_shortcuts_appends_remaining_tokens_after_value() {
+        let d = def_with_shortcuts(
             "br",
             "xdg-open {input}",
             &[("baidu", "https://www.baidu.com")],
         );
         assert_eq!(
-            resolve_args(&d, "baidu extra tokens"),
+            resolve_shortcuts(&d, "baidu extra tokens"),
             "https://www.baidu.com extra tokens"
         );
     }
 
     #[test]
-    fn resolve_args_keeps_unmatched_first_token() {
-        let d = def_with_args(
+    fn resolve_shortcuts_keeps_unmatched_first_token() {
+        let d = def_with_shortcuts(
             "br",
             "xdg-open {input}",
             &[("baidu", "https://www.baidu.com")],
         );
-        assert_eq!(resolve_args(&d, "google.com search"), "google.com search");
+        assert_eq!(
+            resolve_shortcuts(&d, "google.com search"),
+            "google.com search"
+        );
     }
 
     #[test]
-    fn resolve_args_empty_rest_stays_empty() {
-        let d = def_with_args(
+    fn resolve_shortcuts_empty_rest_stays_empty() {
+        let d = def_with_shortcuts(
             "br",
             "xdg-open {input}",
             &[("baidu", "https://www.baidu.com")],
         );
-        assert_eq!(resolve_args(&d, ""), "");
-        assert_eq!(resolve_args(&d, "   "), "");
+        assert_eq!(resolve_shortcuts(&d, ""), "");
+        assert_eq!(resolve_shortcuts(&d, "   "), "");
     }
 
     #[test]
-    fn resolve_args_value_may_contain_spaces() {
-        let d = def_with_args("run", "sh -c {input}", &[("here", "cd /tmp && ls")]);
-        assert_eq!(resolve_args(&d, "here -la"), "cd /tmp && ls -la");
-        assert_eq!(resolve_args(&d, "here"), "cd /tmp && ls");
+    fn resolve_shortcuts_value_may_contain_spaces() {
+        let d = def_with_shortcuts("run", "sh -c {input}", &[("here", "cd /tmp && ls")]);
+        assert_eq!(resolve_shortcuts(&d, "here -la"), "cd /tmp && ls -la");
+        assert_eq!(resolve_shortcuts(&d, "here"), "cd /tmp && ls");
     }
 
     #[test]
-    fn resolve_args_ignores_whitespace_only_value() {
+    fn resolve_shortcuts_ignores_whitespace_only_value() {
         // a blank mapping would silently eat the input; treat it as no match
-        let d = def_with_args("t", "printf %s {input}", &[("blank", "   ")]);
-        assert_eq!(resolve_args(&d, "blank tail"), "blank tail");
+        let d = def_with_shortcuts("t", "printf %s {input}", &[("blank", "   ")]);
+        assert_eq!(resolve_shortcuts(&d, "blank tail"), "blank tail");
     }
 
     #[test]
@@ -323,10 +330,10 @@ mod tests {
         // ... and the same the other way round.
         let macos_only = AliasDef {
             name: "browser".to_string(),
-            shortcuts: vec![],
+            triggers: vec![],
             linux: None,
             macos: Some("printf %s {input}".to_string()),
-            args: BTreeMap::new(),
+            shortcuts: BTreeMap::new(),
             builtin: false,
         };
         assert_eq!(
@@ -336,10 +343,10 @@ mod tests {
         // A blank field counts as missing, not as a command.
         let blank_linux = AliasDef {
             name: "blank".to_string(),
-            shortcuts: vec![],
+            triggers: vec![],
             linux: Some("   ".to_string()),
             macos: Some("printf %s {input}".to_string()),
-            args: BTreeMap::new(),
+            shortcuts: BTreeMap::new(),
             builtin: false,
         };
         assert_eq!(
@@ -352,10 +359,10 @@ mod tests {
     fn missing_commands_on_both_platforms_fail() {
         let none = AliasDef {
             name: "e".to_string(),
-            shortcuts: vec![],
+            triggers: vec![],
             linux: None,
             macos: None,
-            args: BTreeMap::new(),
+            shortcuts: BTreeMap::new(),
             builtin: false,
         };
         match run_alias(&none, "x", Platform::Linux) {

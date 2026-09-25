@@ -3,9 +3,9 @@
 //! Command template conventions:
 //!
 //! * `{input}` - placeholder for the user's input; it is shell-quoted
-//!   (see [`crate::exec::shell_quote`]) before being substituted. Named
-//!   arguments (see `args`) are resolved into the input first
-//!   (see [`crate::exec::resolve_args`]).
+//!   (see [`crate::exec::shell_quote`]) before being substituted. Registered
+//!   shortcuts are resolved into the input first
+//!   (see [`crate::exec::resolve_shortcuts`]).
 //! * `@stdin` - marker meaning the input is delivered through the child
 //!   process stdin; the marker is removed from the command string before
 //!   execution (see [`crate::exec::run_alias`]).
@@ -18,35 +18,35 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AliasDef {
     pub name: String,
-    pub shortcuts: Vec<String>,
+    /// Alternate trigger words resolving to this alias (JSON key `"shortcuts"`, legacy name).
+    #[serde(rename = "shortcuts")]
+    pub triggers: Vec<String>,
     pub linux: Option<String>,
     pub macos: Option<String>,
-    /// Named arguments: typing `<alias> <key> <more…>` replaces `<key>` with
-    /// the mapped value before the command runs. `#[serde(default)]` keeps
-    /// stores written before this field existed loadable.
-    #[serde(default)]
-    pub args: BTreeMap<String, String>,
+    /// Concrete registered shortcuts: typing `<alias> <key> <more…>` maps
+    /// `<key>` to this value before the command runs (JSON key `"args"`, kept
+    /// for store compatibility; `#[serde(default)]` keeps older stores loadable).
+    #[serde(rename = "args", default)]
+    pub shortcuts: BTreeMap<String, String>,
     pub builtin: bool,
 }
 
-/// Built-in aliases shipped with xconsoler: exactly `br` and `cd`, each an
-/// alias, each carrying its concrete content - the command templates *and*
-/// the registered named args - so a fresh machine gets a working `br baidu`
-/// without any store copy.
+/// Built-in aliases shipped with xconsoler: exactly `br` and `cd`, each an alias carrying its
+/// concrete content - the command templates *and* the registered shortcuts - so a fresh machine
+/// gets a working `br baidu` without any store copy.
 pub fn defaults() -> Vec<AliasDef> {
     vec![
         AliasDef {
             name: "br".to_string(),
-            shortcuts: vec![],
+            triggers: vec![],
             // Native launchers, quiet and backgrounded: stray stdout/stderr
             // would scribble over the TUI, and `&` returns the bar at once
             // instead of waiting on the launcher (minutes on some boxes).
             linux: Some("xdg-open {input} >/dev/null 2>&1 &".to_string()),
             macos: Some("open {input} >/dev/null 2>&1 &".to_string()),
-            // Concrete registered content, not an empty shell: `br baidu` /
-            // `br gm` resolve to these urls before the command runs
-            // (see `crate::exec::resolve_args`).
-            args: BTreeMap::from([
+            // Concrete registered shortcuts, not an empty shell: `br baidu`
+            // resolves to these urls (see `crate::exec::resolve_shortcuts`).
+            shortcuts: BTreeMap::from([
                 ("baidu".to_string(), "https://www.baidu.com".to_string()),
                 ("gm".to_string(), "https://mail.google.com".to_string()),
             ]),
@@ -54,36 +54,36 @@ pub fn defaults() -> Vec<AliasDef> {
         },
         AliasDef {
             name: "cd".to_string(),
-            shortcuts: vec![],
+            triggers: vec![],
             // Native backend: no xclip/wl-copy/xsel/pbcopy dependency.
             linux: Some(crate::clipboard::TEMPLATE.to_string()),
             macos: Some(crate::clipboard::TEMPLATE.to_string()),
-            args: BTreeMap::new(),
+            shortcuts: BTreeMap::new(),
             builtin: true,
         },
     ]
 }
 
-/// Resolve a token (full name or shortcut) to a definition, case-insensitively.
+/// Resolve a token (full name or trigger) to a definition, case-insensitively.
 pub fn resolve<'a>(defs: &'a [AliasDef], token: &str) -> Option<&'a AliasDef> {
     let token = token.to_lowercase();
     defs.iter().find(|d| {
-        d.name.to_lowercase() == token || d.shortcuts.iter().any(|s| s.to_lowercase() == token)
+        d.name.to_lowercase() == token || d.triggers.iter().any(|s| s.to_lowercase() == token)
     })
 }
 
-/// Human label such as `t (tt)`; just the name when no shortcut exists.
+/// Human label such as `t (tt)`; just the name when no trigger exists.
 pub fn label(def: &AliasDef) -> String {
-    if def.shortcuts.is_empty() {
+    if def.triggers.is_empty() {
         def.name.clone()
     } else {
-        format!("{} ({})", def.name, def.shortcuts.join(", "))
+        format!("{} ({})", def.name, def.triggers.join(", "))
     }
 }
 
-/// First shortcut, or the name; used when rendering history entries.
+/// First trigger, or the name; used when rendering history entries.
 pub fn entry_label(def: &AliasDef) -> &str {
-    match def.shortcuts.first() {
+    match def.triggers.first() {
         Some(s) => s.as_str(),
         None => def.name.as_str(),
     }
@@ -94,14 +94,14 @@ pub fn entry_label(def: &AliasDef) -> &str {
 pub enum AliasOp {
     Add(AliasDef),
     Remove(String),
-    /// `:arg name key value...` — set (or replace) a named argument.
-    SetArg {
+    /// `:arg` / `:shortcut name key value...` — set (or replace) a shortcut.
+    SetShortcut {
         name: String,
         key: String,
         value: String,
     },
-    /// `:unarg name key` — remove a named argument.
-    DelArg {
+    /// `:unarg` / `:unshortcut name key` — remove a shortcut.
+    DelShortcut {
         name: String,
         key: String,
     },
@@ -114,15 +114,15 @@ pub enum AliasOp {
 /// Supported forms:
 ///
 /// ```text
-/// add <name>[,<shortcut>...] <linux-cmd> [// <macos-cmd>]
+/// add <name>[,<trigger>...] <linux-cmd> [// <macos-cmd>]
 /// del <name>
-/// arg <name> <key> <value...>
-/// unarg <name> <key>
+/// arg <name> <key> <value...>  (shortcut ... is a synonym)
+/// unarg <name> <key>           (unshortcut ... is a synonym)
 /// ```
 ///
 /// A command of `-` means "not configured on this platform". The command
 /// strings keep their original spacing (only re-joined by whitespace tokens);
-/// `arg` values keep theirs too — the value is the raw remainder of the line.
+/// shortcut values keep theirs too — the value is the raw remainder.
 pub fn parse_colon_cmd(line: &str) -> Result<Option<AliasOp>, String> {
     let line = line.trim();
     if line.is_empty() {
@@ -133,17 +133,17 @@ pub fn parse_colon_cmd(line: &str) -> Result<Option<AliasOp>, String> {
         "add" => parse_add(&tokens[1..]),
         "del" => parse_del(&tokens[1..]),
         // `arg` with no arguments must not slice past the line end.
-        "arg" => parse_arg(line.get(1 + tokens[0].len()..).unwrap_or("")),
-        "unarg" => parse_unarg(&tokens[1..]),
+        "arg" | "shortcut" => parse_set_shortcut(line.get(1 + tokens[0].len()..).unwrap_or("")),
+        "unarg" | "unshortcut" => parse_del_shortcut(&tokens[1..]),
         _ => Ok(None), // "help" and anything unknown: caller shows help
     }
 }
 
 fn parse_add(rest: &[&str]) -> Result<Option<AliasOp>, String> {
     if rest.is_empty() {
-        return Err("usage: add <name>[,<shortcut>...] <linux-cmd> // <macos-cmd>".to_string());
+        return Err("usage: add <name>[,<trigger>...] <linux-cmd> // <macos-cmd>".to_string());
     }
-    let (name, shortcuts) = parse_name_list(rest[0])?;
+    let (name, triggers) = parse_name_list(rest[0])?;
 
     let cmd_tokens = &rest[1..];
     let seps = cmd_tokens.iter().filter(|t| **t == "//").count();
@@ -163,10 +163,10 @@ fn parse_add(rest: &[&str]) -> Result<Option<AliasOp>, String> {
 
     Ok(Some(AliasOp::Add(AliasDef {
         name,
-        shortcuts,
+        triggers,
         linux,
         macos,
-        args: BTreeMap::new(),
+        shortcuts: BTreeMap::new(),
         builtin: false,
     })))
 }
@@ -178,9 +178,9 @@ fn parse_del(rest: &[&str]) -> Result<Option<AliasOp>, String> {
     Ok(Some(AliasOp::Remove(rest[0].to_string())))
 }
 
-/// `arg <name> <key> <value...>`: the value is the raw remainder of the
-/// line after the key token, so it may contain (and keep) spaces.
-fn parse_arg(rest: &str) -> Result<Option<AliasOp>, String> {
+/// `arg <name> <key> <value...>` (or `shortcut ...`): the value is the raw
+/// remainder of the line after the key token, so spaces survive.
+fn parse_set_shortcut(rest: &str) -> Result<Option<AliasOp>, String> {
     let toks = indexed_tokens(rest);
     if toks.len() < 3 {
         return Err("usage: arg <name> <key> <value...>".to_string());
@@ -189,18 +189,18 @@ fn parse_arg(rest: &str) -> Result<Option<AliasOp>, String> {
     let (_, key) = toks[1];
     let (value_at, _) = toks[2];
     let value = rest[value_at..].trim();
-    Ok(Some(AliasOp::SetArg {
+    Ok(Some(AliasOp::SetShortcut {
         name: name.to_string(),
         key: key.to_string(),
         value: value.to_string(),
     }))
 }
 
-fn parse_unarg(rest: &[&str]) -> Result<Option<AliasOp>, String> {
+fn parse_del_shortcut(rest: &[&str]) -> Result<Option<AliasOp>, String> {
     if rest.len() != 2 {
         return Err("usage: unarg <name> <key>".to_string());
     }
-    Ok(Some(AliasOp::DelArg {
+    Ok(Some(AliasOp::DelShortcut {
         name: rest[0].to_string(),
         key: rest[1].to_string(),
     }))
@@ -236,17 +236,17 @@ fn parse_name_list(raw: &str) -> Result<(String, Vec<String>), String> {
     if !valid_ident(name) {
         return Err(format!("invalid alias name: {name}"));
     }
-    let mut shortcuts = Vec::new();
+    let mut triggers = Vec::new();
     for sc in parts {
         if sc.is_empty() || !valid_ident(sc) {
-            return Err(format!("invalid shortcut: {sc}"));
+            return Err(format!("invalid trigger: {sc}"));
         }
-        shortcuts.push(sc.to_string());
+        triggers.push(sc.to_string());
     }
-    Ok((name.to_string(), shortcuts))
+    Ok((name.to_string(), triggers))
 }
 
-/// Names and shortcuts may contain only alphanumerics, `-` and `_`.
+/// Names and triggers may contain only alphanumerics, `-` and `_`.
 /// Public so the settings form validates its wizard input the same way.
 pub fn valid_ident(s: &str) -> bool {
     !s.is_empty()
@@ -264,53 +264,51 @@ fn cmd_or_none(joined: &str) -> Option<String> {
     }
 }
 
-/// Set (or replace) named argument `key` on user alias `name` inside the
-/// persisted alias list. A built-in name is materialized as an overriding
-/// user definition first — that is how `:arg br k v` persists. Returns
-/// the previous value when the key already existed. `Err` for unknown names.
-pub fn set_arg(
+/// Set (or replace) shortcut `key` on user alias `name` in the persisted
+/// alias list. A built-in name is materialized as an overriding user
+/// definition first — that is how `:arg br k v` persists. Returns the
+/// previous value when the key already existed. `Err` for unknown names.
+pub fn set_shortcut(
     user: &mut Vec<AliasDef>,
     name: &str,
     key: &str,
     value: &str,
 ) -> Result<Option<String>, String> {
     if let Some(def) = user.iter_mut().find(|d| d.name == name) {
-        return Ok(def.args.insert(key.to_string(), value.to_string()));
+        return Ok(def.shortcuts.insert(key.to_string(), value.to_string()));
     }
     if let Some(mut def) = defaults().into_iter().find(|d| d.name == name) {
         def.builtin = false;
-        let prev = def.args.insert(key.to_string(), value.to_string());
+        let prev = def.shortcuts.insert(key.to_string(), value.to_string());
         user.push(def);
         return Ok(prev);
     }
     Err(format!("alias not found: {name}"))
 }
 
-/// Remove named argument `key` from user alias `name`. `Err` when the alias
-/// is unknown or does not carry that key.
-pub fn remove_arg(user: &mut [AliasDef], name: &str, key: &str) -> Result<(), String> {
+/// Remove shortcut `key` from user alias `name`. `Err` when the alias is
+/// unknown or does not carry that key.
+pub fn remove_shortcut(user: &mut [AliasDef], name: &str, key: &str) -> Result<(), String> {
     match user.iter_mut().find(|d| d.name == name) {
-        Some(def) => match def.args.remove(key) {
+        Some(def) => match def.shortcuts.remove(key) {
             Some(_) => Ok(()),
-            None => Err(format!("no named arg \"{key}\" on {name}")),
+            None => Err(format!("no shortcut \"{key}\" on {name}")),
         },
         None => Err(format!("alias not found: {name}")),
     }
 }
 
-/// Append shortcut `shortcut` to user alias `name`.
+/// Append trigger `trigger` to user alias `name`.
 ///
-/// Follows [`set_arg`]: a built-in name is materialised into the user list
-/// first (clone of the default, `builtin = false`, registered args kept), so
-/// built-ins can gain quick-launch entries too. The shortcut must be a
-/// [`valid_ident`] and must not already resolve to a *different* alias -
-/// names and shortcuts collide case-insensitively, the way [`resolve`]
-/// matches them. `Ok(true)` when appended, `Ok(false)` when this alias
-/// already answers to that word, `Err` when the alias is unknown or its new
-/// word is malformed or taken.
-pub fn add_shortcut(user: &mut Vec<AliasDef>, name: &str, shortcut: &str) -> Result<bool, String> {
-    if !valid_ident(shortcut) {
-        return Err(format!("invalid shortcut: {shortcut}"));
+/// Follows [`set_shortcut`]: a built-in name is materialised into the user
+/// list first (registered shortcuts kept), so built-ins can gain alternate
+/// words too. The trigger must be a [`valid_ident`] and must not already
+/// resolve to a *different* alias. `Ok(true)` when appended, `Ok(false)`
+/// when this alias already answers to that word, `Err` on an unknown alias
+/// or a malformed/taken word.
+pub fn add_trigger(user: &mut Vec<AliasDef>, name: &str, trigger: &str) -> Result<bool, String> {
+    if !valid_ident(trigger) {
+        return Err(format!("invalid trigger: {trigger}"));
     }
     // The alias must exist: a user def, or a built-in to materialise below.
     if !user.iter().any(|d| d.name == name) && !defaults().iter().any(|d| d.name == name) {
@@ -319,17 +317,17 @@ pub fn add_shortcut(user: &mut Vec<AliasDef>, name: &str, shortcut: &str) -> Res
     // Collision check against the effective list (user defs shadow same-named
     // built-ins). An error here must leave `user` untouched.
     let effective = crate::storage::merge_aliases(user);
-    if let Some(other) = resolve(&effective, shortcut) {
+    if let Some(other) = resolve(&effective, trigger) {
         if other.name.eq_ignore_ascii_case(name) {
             return Ok(false); // this alias already answers to it
         }
         return Err(format!(
-            "shortcut \"{shortcut}\" already used by {}",
+            "trigger \"{trigger}\" already used by {}",
             other.name
         ));
     }
 
-    // Materialise a built-in override, exactly like `set_arg` does.
+    // Materialise a built-in override, exactly like `set_shortcut` does.
     let idx = match user.iter().position(|d| d.name == name) {
         Some(i) => i,
         None => match defaults().into_iter().find(|d| d.name == name) {
@@ -342,40 +340,29 @@ pub fn add_shortcut(user: &mut Vec<AliasDef>, name: &str, shortcut: &str) -> Res
         },
     };
     let def = &mut user[idx];
-    // `resolve` ignores case, so `Tt` on a `tt` shortcut is the same word.
-    if def
-        .shortcuts
-        .iter()
-        .any(|s| s.eq_ignore_ascii_case(shortcut))
-    {
+    // `resolve` ignores case, so `Tt` on a `tt` trigger is the same word.
+    if def.triggers.iter().any(|s| s.eq_ignore_ascii_case(trigger)) {
         return Ok(false);
     }
-    def.shortcuts.push(shortcut.to_string());
+    def.triggers.push(trigger.to_string());
     Ok(true)
 }
 
-/// Remove shortcut `shortcut` from user alias `name`, case-insensitively.
+/// Remove trigger `trigger` from user alias `name`, case-insensitively.
 ///
-/// Only the user list is scanned, like [`remove_arg`]: a built-in keeps its
-/// own fixed names until an override materialises it. `Ok(true)` when a
-/// shortcut was removed, `Ok(false)` when the alias or the shortcut is
-/// unknown to the user list.
-// `&mut Vec` (not `&mut [_]`) keeps the three editing helpers on one
-// signature; only `add_shortcut`/`set_commands` actually push.
+/// Only the user list is scanned, like [`remove_shortcut`]: a built-in keeps
+/// its own fixed names until an override materialises it.
+// `&mut Vec` (not `&mut [_]`): only `add_trigger`/`set_commands` push.
 #[allow(clippy::ptr_arg)]
-pub fn remove_shortcut(
-    user: &mut Vec<AliasDef>,
-    name: &str,
-    shortcut: &str,
-) -> Result<bool, String> {
+pub fn remove_trigger(user: &mut Vec<AliasDef>, name: &str, trigger: &str) -> Result<bool, String> {
     match user.iter_mut().find(|d| d.name == name) {
         Some(def) => match def
-            .shortcuts
+            .triggers
             .iter()
-            .position(|s| s.eq_ignore_ascii_case(shortcut))
+            .position(|s| s.eq_ignore_ascii_case(trigger))
         {
             Some(i) => {
-                def.shortcuts.remove(i);
+                def.triggers.remove(i);
                 Ok(true)
             }
             None => Ok(false),
@@ -387,7 +374,7 @@ pub fn remove_shortcut(
 /// Set the linux/macos command of user alias `name`.
 ///
 /// A built-in name is materialised into the user list first (clone of the
-/// default, `builtin = false`, registered args kept). A blank `macos` mirrors
+/// default, `builtin = false`, registered shortcuts kept). A blank `macos` mirrors
 /// `linux`, the same rule the settings wizard applies to single-platform
 /// aliases; both fields end up `Some(...)` so the run path always finds a
 /// command. `Err` only when the alias is unknown.
@@ -426,23 +413,23 @@ mod tests {
     fn user_def(name: &str, linux: Option<&str>) -> AliasDef {
         AliasDef {
             name: name.to_string(),
-            shortcuts: vec![],
+            triggers: vec![],
             linux: linux.map(|s| s.to_string()),
             macos: None,
-            args: BTreeMap::new(),
+            shortcuts: BTreeMap::new(),
             builtin: false,
         }
     }
 
     #[test]
-    fn defaults_have_no_shortcuts_and_resolve_by_name_any_case() {
+    fn defaults_have_no_triggers_and_resolve_by_name_any_case() {
         let defs = defaults();
         assert_eq!(
             defs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
             vec!["br", "cd"],
             "builtins are exactly br and cd"
         );
-        assert!(defs.iter().all(|d| d.shortcuts.is_empty() && d.builtin));
+        assert!(defs.iter().all(|d| d.triggers.is_empty() && d.builtin));
         let br = resolve(&defs, "br").expect("br resolves");
         assert_eq!(br.name, "br");
         assert!(resolve(&defs, "BR").is_some());
@@ -483,24 +470,24 @@ mod tests {
         let defs = defaults();
         let br = resolve(&defs, "br").expect("br resolves");
         assert_eq!(
-            br.args.get("baidu").map(String::as_str),
+            br.shortcuts.get("baidu").map(String::as_str),
             Some("https://www.baidu.com")
         );
         assert_eq!(
-            br.args.get("gm").map(String::as_str),
+            br.shortcuts.get("gm").map(String::as_str),
             Some("https://mail.google.com")
         );
-        // The registered args are wired into the run path.
+        // The registered shortcuts are wired into the run path.
         assert_eq!(
-            crate::exec::resolve_args(br, "baidu"),
+            crate::exec::resolve_shortcuts(br, "baidu"),
             "https://www.baidu.com"
         );
         assert_eq!(
-            crate::exec::resolve_args(br, "baidu ?q=1"),
+            crate::exec::resolve_shortcuts(br, "baidu ?q=1"),
             "https://www.baidu.com ?q=1"
         );
         assert_eq!(
-            crate::exec::resolve_args(br, "https://x.dev"),
+            crate::exec::resolve_shortcuts(br, "https://x.dev"),
             "https://x.dev"
         );
         let cd = resolve(&defs, "cd").expect("cd resolves");
@@ -510,14 +497,14 @@ mod tests {
     }
 
     #[test]
-    fn labels_use_first_shortcut_when_present() {
+    fn labels_use_first_trigger_when_present() {
         let defs = defaults();
         let br = resolve(&defs, "br").unwrap();
         assert_eq!(label(br), "br");
         assert_eq!(entry_label(br), "br");
 
         let mut d = br.clone();
-        d.shortcuts = vec!["b".to_string()];
+        d.triggers = vec!["b".to_string()];
         assert_eq!(label(&d), "br (b)");
         assert_eq!(entry_label(&d), "b");
     }
@@ -530,7 +517,7 @@ mod tests {
         match op {
             AliasOp::Add(def) => {
                 assert_eq!(def.name, "myalias");
-                assert_eq!(def.shortcuts, vec!["ma".to_string()]);
+                assert_eq!(def.triggers, vec!["ma".to_string()]);
                 assert_eq!(def.linux.as_deref(), Some("echo {input}"));
                 assert_eq!(def.macos.as_deref(), Some("say {input}"));
                 assert!(!def.builtin);
@@ -582,179 +569,189 @@ mod tests {
     }
 
     #[test]
-    fn parse_arg_keeps_value_spacing() {
+    fn parse_shortcut_keeps_value_spacing() {
         match parse_colon_cmd("arg br baidu https://www.baidu.com")
             .unwrap()
             .unwrap()
         {
-            AliasOp::SetArg { name, key, value } => {
+            AliasOp::SetShortcut { name, key, value } => {
                 assert_eq!(name, "br");
                 assert_eq!(key, "baidu");
                 assert_eq!(value, "https://www.baidu.com");
             }
-            other => panic!("expected SetArg, got {other:?}"),
+            other => panic!("expected SetShortcut, got {other:?}"),
         }
         // the value is the raw remainder: internal spacing survives
         match parse_colon_cmd("arg  t   here   cd /tmp  &&   ls ")
             .unwrap()
             .unwrap()
         {
-            AliasOp::SetArg { value, .. } => assert_eq!(value, "cd /tmp  &&   ls"),
-            other => panic!("expected SetArg, got {other:?}"),
+            AliasOp::SetShortcut { value, .. } => assert_eq!(value, "cd /tmp  &&   ls"),
+            other => panic!("expected SetShortcut, got {other:?}"),
         }
     }
 
     #[test]
-    fn parse_arg_requires_three_parts() {
+    fn parse_shortcut_requires_three_parts() {
         assert!(parse_colon_cmd("arg").is_err());
         assert!(parse_colon_cmd("arg br").is_err());
         assert!(parse_colon_cmd("arg br baidu").is_err());
     }
 
     #[test]
-    fn parse_unarg() {
+    fn parse_unshortcut() {
         match parse_colon_cmd("unarg br baidu").unwrap().unwrap() {
-            AliasOp::DelArg { name, key } => {
+            AliasOp::DelShortcut { name, key } => {
                 assert_eq!(name, "br");
                 assert_eq!(key, "baidu");
             }
-            other => panic!("expected DelArg, got {other:?}"),
+            other => panic!("expected DelShortcut, got {other:?}"),
         }
         assert!(parse_colon_cmd("unarg br").is_err());
         assert!(parse_colon_cmd("unarg a b c").is_err());
     }
 
     #[test]
-    fn set_arg_on_user_alias_and_replacement() {
+    fn parse_shortcut_synonyms_map_to_the_same_ops() {
+        let cmd = |line: &str| parse_colon_cmd(line).unwrap();
+        assert_eq!(cmd("shortcut t tt value"), cmd("arg t tt value"));
+        assert_eq!(cmd("unshortcut t tt"), cmd("unarg t tt"));
+    }
+
+    #[test]
+    fn set_shortcut_on_user_alias_and_replacement() {
         let mut user = vec![user_def("t", Some("echo {input}"))];
-        assert_eq!(set_arg(&mut user, "t", "here", "cd /tmp").unwrap(), None);
         assert_eq!(
-            set_arg(&mut user, "t", "here", "cd /var").unwrap(),
+            set_shortcut(&mut user, "t", "here", "cd /tmp").unwrap(),
+            None
+        );
+        assert_eq!(
+            set_shortcut(&mut user, "t", "here", "cd /var").unwrap(),
             Some("cd /tmp".into())
         );
         assert_eq!(
-            user[0].args.get("here").map(String::as_str),
+            user[0].shortcuts.get("here").map(String::as_str),
             Some("cd /var")
         );
         assert_eq!(
-            set_arg(&mut user, "nope", "k", "v").unwrap_err(),
+            set_shortcut(&mut user, "nope", "k", "v").unwrap_err(),
             "alias not found: nope"
         );
     }
 
     #[test]
-    fn set_arg_on_builtin_materializes_user_override() {
+    fn set_shortcut_on_builtin_materializes_user_override() {
         let mut user = vec![];
         // A new key on a builtin materializes a user override that keeps the
         // builtin's own registered content (br ships with baidu/gm already).
         assert_eq!(
-            set_arg(&mut user, "br", "gh", "https://github.com").unwrap(),
+            set_shortcut(&mut user, "br", "gh", "https://github.com").unwrap(),
             None
         );
         assert_eq!(user.len(), 1);
         assert!(!user[0].builtin, "override must be a plain user def");
         assert!(user[0].linux.is_some(), "override keeps the command");
         assert_eq!(
-            user[0].args.get("gh").map(String::as_str),
+            user[0].shortcuts.get("gh").map(String::as_str),
             Some("https://github.com")
         );
         assert_eq!(
-            user[0].args.get("baidu").map(String::as_str),
+            user[0].shortcuts.get("baidu").map(String::as_str),
             Some("https://www.baidu.com"),
             "builtin args carry over into the override"
         );
         // Re-registering an existing key reports the previous value.
         assert_eq!(
-            set_arg(&mut user, "br", "gh", "https://gitlab.com").unwrap(),
+            set_shortcut(&mut user, "br", "gh", "https://gitlab.com").unwrap(),
             Some("https://github.com".to_string())
         );
     }
 
     #[test]
-    fn remove_arg_errors_and_success() {
+    fn remove_shortcut_errors_and_success() {
         let mut user = vec![user_def("t", Some("echo {input}"))];
-        set_arg(&mut user, "t", "here", "cd /tmp").unwrap();
-        assert!(remove_arg(&mut user, "t", "here").is_ok());
-        assert!(user[0].args.is_empty());
+        set_shortcut(&mut user, "t", "here", "cd /tmp").unwrap();
+        assert!(remove_shortcut(&mut user, "t", "here").is_ok());
+        assert!(user[0].shortcuts.is_empty());
         assert_eq!(
-            remove_arg(&mut user, "t", "here").unwrap_err(),
-            "no named arg \"here\" on t"
+            remove_shortcut(&mut user, "t", "here").unwrap_err(),
+            "no shortcut \"here\" on t"
         );
         assert_eq!(
-            remove_arg(&mut user, "ghost", "here").unwrap_err(),
+            remove_shortcut(&mut user, "ghost", "here").unwrap_err(),
             "alias not found: ghost"
         );
     }
 
     #[test]
-    fn add_shortcut_on_user_alias_is_idempotent() {
+    fn add_trigger_on_user_alias_is_idempotent() {
         let mut user = vec![user_def("t", Some("echo {input}"))];
-        assert!(add_shortcut(&mut user, "t", "tt").unwrap());
-        assert_eq!(user[0].shortcuts, vec!["tt".to_string()]);
+        assert!(add_trigger(&mut user, "t", "tt").unwrap());
+        assert_eq!(user[0].triggers, vec!["tt".to_string()]);
         // Case-insensitive: the alias already answers to "tt" (and to "t").
-        assert!(!add_shortcut(&mut user, "t", "TT").unwrap());
-        assert!(!add_shortcut(&mut user, "t", "T").unwrap());
-        assert_eq!(user[0].shortcuts, vec!["tt".to_string()]);
+        assert!(!add_trigger(&mut user, "t", "TT").unwrap());
+        assert!(!add_trigger(&mut user, "t", "T").unwrap());
+        assert_eq!(user[0].triggers, vec!["tt".to_string()]);
 
-        let err = add_shortcut(&mut user, "ghost", "g").unwrap_err();
+        let err = add_trigger(&mut user, "ghost", "g").unwrap_err();
         assert_eq!(err, "alias not found: ghost");
         assert_eq!(
-            add_shortcut(&mut user, "t", "bad!").unwrap_err(),
-            "invalid shortcut: bad!"
+            add_trigger(&mut user, "t", "bad!").unwrap_err(),
+            "invalid trigger: bad!"
         );
         assert_eq!(user.len(), 1, "errors never touch the list");
-        assert_eq!(user[0].shortcuts, vec!["tt".to_string()]);
+        assert_eq!(user[0].triggers, vec!["tt".to_string()]);
     }
 
     #[test]
-    fn add_shortcut_on_builtin_materializes_user_override() {
+    fn add_trigger_on_builtin_materializes_user_override() {
         let mut user = vec![];
-        assert!(add_shortcut(&mut user, "br", "b").unwrap());
+        assert!(add_trigger(&mut user, "br", "b").unwrap());
         assert_eq!(user.len(), 1);
         assert!(!user[0].builtin, "override must be a plain user def");
-        assert_eq!(user[0].shortcuts, vec!["b".to_string()]);
+        assert_eq!(user[0].triggers, vec!["b".to_string()]);
         assert!(user[0].linux.is_some() && user[0].macos.is_some());
         assert_eq!(
-            user[0].args.get("baidu").map(String::as_str),
+            user[0].shortcuts.get("baidu").map(String::as_str),
             Some("https://www.baidu.com")
         );
         // Already there: no duplicate, no second override.
-        assert!(!add_shortcut(&mut user, "br", "B").unwrap());
+        assert!(!add_trigger(&mut user, "br", "B").unwrap());
         assert_eq!(user.len(), 1);
-        assert_eq!(user[0].shortcuts, vec!["b".to_string()]);
+        assert_eq!(user[0].triggers, vec!["b".to_string()]);
     }
 
     #[test]
-    fn add_shortcut_rejects_a_word_taken_by_another_alias() {
+    fn add_trigger_rejects_a_word_taken_by_another_alias() {
         let mut user = vec![user_def("t", Some("echo {input}"))];
-        add_shortcut(&mut user, "t", "tt").unwrap();
+        add_trigger(&mut user, "t", "tt").unwrap();
         user.push(user_def("u", Some("printf {input}")));
 
         // "cd" is a built-in name, "tt" a shortcut of another user alias.
         for taken in ["cd", "CD", "tt", "Tt"] {
-            let err = add_shortcut(&mut user, "u", taken).unwrap_err();
+            let err = add_trigger(&mut user, "u", taken).unwrap_err();
             assert!(err.contains("already used"), "{err}");
         }
-        assert!(user[1].shortcuts.is_empty(), "nothing was appended");
+        assert!(user[1].triggers.is_empty(), "nothing was appended");
     }
 
     #[test]
-    fn remove_shortcut_only_scans_the_user_list() {
+    fn remove_trigger_only_scans_the_user_list() {
         let mut user = vec![user_def("t", Some("echo {input}"))];
-        add_shortcut(&mut user, "t", "tt").unwrap();
-        add_shortcut(&mut user, "t", "t2").unwrap();
+        add_trigger(&mut user, "t", "tt").unwrap();
+        add_trigger(&mut user, "t", "t2").unwrap();
         assert!(
-            remove_shortcut(&mut user, "t", "TT").unwrap(),
+            remove_trigger(&mut user, "t", "TT").unwrap(),
             "case-insensitive"
         );
-        assert_eq!(user[0].shortcuts, vec!["t2".to_string()], "one match goes");
-        assert!(remove_shortcut(&mut user, "t", "t2").unwrap());
-        assert!(user[0].shortcuts.is_empty());
+        assert_eq!(user[0].triggers, vec!["t2".to_string()], "one match goes");
+        assert!(remove_trigger(&mut user, "t", "t2").unwrap());
+        assert!(user[0].triggers.is_empty());
         // Unknown shortcut, unknown alias, and an un-materialised builtin all
         // report "nothing removed" instead of an error.
-        assert!(!remove_shortcut(&mut user, "t", "tt").unwrap());
-        assert!(!remove_shortcut(&mut user, "ghost", "tt").unwrap());
-        assert!(!remove_shortcut(&mut user, "br", "b").unwrap());
+        assert!(!remove_trigger(&mut user, "t", "tt").unwrap());
+        assert!(!remove_trigger(&mut user, "ghost", "tt").unwrap());
+        assert!(!remove_trigger(&mut user, "br", "b").unwrap());
     }
 
     #[test]
@@ -779,7 +776,11 @@ mod tests {
         assert!(!user[0].builtin, "override must be a plain user def");
         assert_eq!(user[0].linux.as_deref(), Some("xdg-open {input}"));
         assert_eq!(user[0].macos.as_deref(), Some("xdg-open {input}"));
-        assert_eq!(user[0].args.len(), 2, "registered args carry over");
+        assert_eq!(
+            user[0].shortcuts.len(),
+            2,
+            "registered shortcuts carry over"
+        );
         let err = set_commands(&mut user, "ghost", "a", "b").unwrap_err();
         assert_eq!(err, "alias not found: ghost");
     }

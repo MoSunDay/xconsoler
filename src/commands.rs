@@ -26,12 +26,12 @@ pub const ALL: [CommandSpec; 6] = [
     },
     CommandSpec {
         token: ":arg",
-        desc: "set a named argument",
+        desc: "set a shortcut (alias key value)",
         needs_arg: true,
     },
     CommandSpec {
         token: ":unarg",
-        desc: "remove a named argument",
+        desc: "remove a shortcut (alias key)",
         needs_arg: true,
     },
     CommandSpec {

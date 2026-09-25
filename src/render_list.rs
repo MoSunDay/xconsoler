@@ -10,7 +10,6 @@ use ratatui::Frame;
 
 use crate::alias;
 use crate::matcher::Candidate;
-use crate::platform::{self, Platform};
 use crate::render::{clip, main_block, row_rect, segments_line};
 use crate::state::{self, App};
 use crate::theme::{ACCENT, MUTED, SELECT_BG, SUBTLE, TEXT};
@@ -47,7 +46,6 @@ pub(crate) fn draw_candidates(f: &mut Frame, app: &App, width: u16, y: u16) -> u
     let start = cursor
         .saturating_sub(rows.saturating_sub(1))
         .min(cands.len().saturating_sub(rows));
-    let pf = platform::current();
 
     let lines: Vec<Line> = cands
         .iter()
@@ -57,8 +55,7 @@ pub(crate) fn draw_candidates(f: &mut Frame, app: &App, width: u16, y: u16) -> u
         .map(|(i, cand)| {
             let segs = match cand {
                 Candidate::History { idx } => history_segments(app, *idx),
-                Candidate::Alias { name } => alias_segments(app, name, pf),
-                Candidate::Arg { alias, key } => arg_row_segments(app, alias, key),
+                Candidate::Shortcut { alias, key } => shortcut_row_segments(app, alias, key),
             };
             segments_line(segs, inner.width as usize, i + start == cursor, sel_style)
         })
@@ -76,17 +73,14 @@ fn list_title(app: &App, cands: &[Candidate], rows: usize) -> String {
         .iter()
         .filter(|c| matches!(c, Candidate::History { .. }))
         .count();
-    let args = shown
+    let shortcuts = shown
         .iter()
-        .filter(|c| matches!(c, Candidate::Arg { .. }))
+        .filter(|c| matches!(c, Candidate::Shortcut { .. }))
         .count();
     if app.input.trim().is_empty() {
         return format!(" recent · {hist} history ");
     }
-    format!(
-        " matches · {hist} history · {} alias · {args} args ",
-        shown.len() - hist - args
-    )
+    format!(" matches · {hist} history · {shortcuts} shortcut ")
 }
 
 /// History row: the record mark, the entry label and the recorded input.
@@ -108,36 +102,14 @@ fn history_segments(app: &App, idx: usize) -> Vec<(String, Style)> {
     }
 }
 
-/// Alias row: the star mark, the alias label and its command template for
-/// the current platform.
-fn alias_segments(app: &App, name: &str, pf: Platform) -> Vec<(String, Style)> {
-    match alias::resolve(&app.aliases, name) {
-        Some(def) => {
-            let cmd = match pf {
-                Platform::Linux => def.linux.as_deref(),
-                Platform::Macos => def.macos.as_deref(),
-            }
-            .unwrap_or("—");
-            vec![
-                ("★ ".into(), Style::new().fg(ACCENT)),
-                (alias::label(def), Style::new().fg(ACCENT)),
-                (" · ".into(), Style::new().fg(SUBTLE)),
-                (cmd.to_string(), Style::new().fg(SUBTLE)),
-            ]
-        }
-        None => vec![("★ …".into(), Style::new().fg(MUTED))],
-    }
-}
-
-/// Named-arg row: the arg mark, the key and its value (the input is
-/// `<alias> <partial>`).
-fn arg_row_segments(app: &App, alias: &str, key: &str) -> Vec<(String, Style)> {
+/// Shortcut row: the shortcut mark, `alias key` and the registered value.
+fn shortcut_row_segments(app: &App, alias: &str, key: &str) -> Vec<(String, Style)> {
     let value = alias::resolve(&app.aliases, alias)
-        .and_then(|d| d.args.get(key).cloned())
+        .and_then(|d| d.shortcuts.get(key).cloned())
         .unwrap_or_else(|| "…".to_string());
     vec![
         ("↳ ".into(), Style::new().fg(MUTED)),
-        (key.to_string(), Style::new().fg(ACCENT)),
+        (format!("{alias} {key}"), Style::new().fg(ACCENT)),
         (" · ".into(), Style::new().fg(SUBTLE)),
         (value, Style::new().fg(SUBTLE)),
     ]
@@ -157,18 +129,15 @@ mod tests {
     fn list_title_counts_kinds_and_names_the_recent_list() {
         let cands = vec![
             Candidate::History { idx: 0 },
-            Candidate::Alias {
-                name: "br".to_string(),
-            },
-            Candidate::Arg {
+            Candidate::Shortcut {
                 alias: "br".to_string(),
                 key: "baidu".to_string(),
             },
         ];
         let typing = app_with_history();
         assert_eq!(
-            list_title(&typing, &cands, 3),
-            " matches · 1 history · 1 alias · 1 args "
+            list_title(&typing, &cands, 2),
+            " matches · 1 history · 1 shortcut "
         );
         let empty = app_with_recent_history(2);
         assert_eq!(list_title(&empty, &cands[..1], 1), " recent · 1 history ");
@@ -189,8 +158,8 @@ mod tests {
         assert!(!text.contains("cmd-01"), "oldest dropped: {text}");
         assert!(!text.contains("cmd-00"), "oldest dropped: {text}");
         assert!(
-            !text.contains('★'),
-            "no alias rows on the empty bar: {text}"
+            !text.contains('↳'),
+            "no shortcut rows on the empty bar: {text}"
         );
     }
 

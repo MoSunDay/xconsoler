@@ -81,18 +81,25 @@ pub fn new(store: Store, summon: bool) -> App {
 
 /// Ranked candidates for the current input (trimmed). An empty input lists up
 /// to [`RECENT_LIMIT`] recent history rows; a typed input lists up to
-/// [`CANDIDATE_LIMIT`], history before aliases.
+/// [`CANDIDATE_LIMIT`], history before shortcuts.
 pub fn candidates(app: &App) -> Vec<Candidate> {
-    if app.input.trim().is_empty() {
+    let query = app.input.trim();
+    // `:`/`/` inputs are command lines (palette or validation), never alias
+    // queries: the urls inside shortcut values would otherwise match.
+    if query.starts_with('/') || query.starts_with(':') {
+        return Vec::new();
+    }
+    if query.is_empty() {
         return matcher::candidates(&app.store, &app.aliases, "", RECENT_LIMIT);
     }
-    // `<alias> <partial>` switches to that alias's named args; anything else
-    // (including a bare alias) keeps the normal history-first ranking.
-    let args = matcher::arg_candidates(&app.aliases, &app.input, CANDIDATE_LIMIT);
-    if args.is_empty() {
-        matcher::candidates(&app.store, &app.aliases, app.input.trim(), CANDIDATE_LIMIT)
+    // `<alias> <partial>` switches to that alias's concrete shortcuts;
+    // anything else (including a bare alias) keeps the normal history-first
+    // ranking.
+    let shortcuts = matcher::shortcut_candidates(&app.aliases, &app.input, CANDIDATE_LIMIT);
+    if shortcuts.is_empty() {
+        matcher::candidates(&app.store, &app.aliases, query, CANDIDATE_LIMIT)
     } else {
-        args
+        shortcuts
     }
 }
 
@@ -120,37 +127,37 @@ mod tests {
         new(store, false)
     }
 
-    fn app_with_named_arg() -> App {
+    fn app_with_shortcut() -> App {
         let mut store = Store::default();
         let mut def = crate::alias::defaults().remove(0); // br builtin
-        def.args.clear(); // fixture: exactly the args below
+        def.shortcuts.clear(); // fixture: exactly the shortcuts below
         def.builtin = false;
-        def.args
+        def.shortcuts
             .insert("baidu".to_string(), "https://www.baidu.com".to_string());
         store.aliases.push(def);
         new(store, false)
     }
 
     #[test]
-    fn named_arg_context_lists_args_once_a_space_is_typed() {
-        let mut app = app_with_named_arg();
+    fn shortcut_context_lists_shortcuts_once_a_space_is_typed() {
+        let mut app = app_with_shortcut();
         assert!(
-            candidates(&app)
-                .iter()
-                .all(|c| !matches!(c, Candidate::Arg { .. })),
-            "empty input: normal ranking"
+            candidates(&app).is_empty(),
+            "empty input with no history: no rows"
         );
         app.input = "br".to_string();
-        assert!(
-            candidates(&app)
-                .iter()
-                .all(|c| !matches!(c, Candidate::Arg { .. })),
-            "bare alias still ranks aliases"
+        assert_eq!(
+            candidates(&app),
+            vec![Candidate::Shortcut {
+                alias: "br".to_string(),
+                key: "baidu".to_string()
+            }],
+            "bare alias ranks its concrete shortcuts"
         );
         app.input = "br ".to_string();
         assert_eq!(
             candidates(&app),
-            vec![Candidate::Arg {
+            vec![Candidate::Shortcut {
                 alias: "br".to_string(),
                 key: "baidu".to_string()
             }]
@@ -158,7 +165,7 @@ mod tests {
         app.input = "br bai".to_string();
         assert_eq!(
             candidates(&app),
-            vec![Candidate::Arg {
+            vec![Candidate::Shortcut {
                 alias: "br".to_string(),
                 key: "baidu".to_string()
             }]
@@ -167,7 +174,7 @@ mod tests {
         assert!(
             candidates(&app)
                 .iter()
-                .all(|c| !matches!(c, Candidate::Arg { .. })),
+                .all(|c| !matches!(c, Candidate::Shortcut { .. })),
             "unmatched partial falls back to the normal ranking"
         );
     }
@@ -219,8 +226,8 @@ mod tests {
         assert_eq!(new(store, false).command, keyspec::DEFAULT_COMMAND);
     }
 
-    /// Empty input lists the recent history only: aliases come back as soon
-    /// as a query character is typed.
+    /// Empty input lists the recent history only: shortcuts come back as
+    /// soon as a query character is typed.
     #[test]
     fn empty_input_lists_recent_history_only() {
         let app = app_with_history();
@@ -230,8 +237,8 @@ mod tests {
         );
     }
 
-    /// The empty bar respects the recent-history cap: aliases come back as
-    /// soon as a query character is typed.
+    /// The empty bar respects the recent-history cap: shortcuts come back
+    /// as soon as a query character is typed.
     #[test]
     fn empty_bar_lists_at_most_recent_limit() {
         let app = app_with_history();
@@ -239,7 +246,7 @@ mod tests {
     }
 
     /// A typed query caps at `CANDIDATE_LIMIT` and fills the slots with the
-    /// newest matching history entries before any alias row.
+    /// newest matching history entries before any shortcut row.
     #[test]
     fn typed_query_lists_at_most_five_history_first() {
         let mut store = Store::default();
@@ -255,24 +262,25 @@ mod tests {
         assert_eq!(out[4], Candidate::History { idx: 4 });
     }
 
-    /// The twist only applies to the empty bar: a typed query brings aliases
-    /// back, after every matching history entry.
+    /// The twist only applies to the empty bar: a typed query brings
+    /// concrete shortcuts back, after every matching history entry.
     #[test]
-    fn typed_query_brings_aliases_back() {
+    fn typed_query_brings_shortcuts_back() {
         let mut app = app_with_history();
         app.input = "br".to_string();
         let out = candidates(&app);
         assert!(out.contains(&Candidate::History { idx: 0 }), "{out:?}");
         assert!(
-            out.contains(&Candidate::Alias {
-                name: "br".to_string()
+            out.contains(&Candidate::Shortcut {
+                alias: "br".to_string(),
+                key: "baidu".to_string()
             }),
             "{out:?}"
         );
     }
 
     #[test]
-    fn empty_input_without_history_is_empty_despite_aliases() {
+    fn empty_input_without_history_is_empty_despite_shortcuts() {
         let app = new(Store::default(), false);
         assert!(candidates(&app).is_empty());
         assert_eq!(selected(&app), None);
