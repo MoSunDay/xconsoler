@@ -186,10 +186,10 @@ mod tests {
     fn user_def(name: &str, linux: Option<&str>) -> AliasDef {
         AliasDef {
             name: name.to_string(),
-            shortcuts: vec![],
+            triggers: vec![],
             linux: linux.map(|s| s.to_string()),
             macos: None,
-            args: BTreeMap::new(),
+            shortcuts: BTreeMap::new(),
             builtin: false,
         }
     }
@@ -331,6 +331,69 @@ mod tests {
         let store = load(&path);
         assert_eq!(store.config.wake_key, "alt+d");
         assert_eq!(store.config.command_key, "alt+d");
+    }
+
+    /// On-disk compatibility: the old field names are still the JSON keys —
+    /// `"shortcuts"` holds the trigger words and `"args"` holds the concrete
+    /// key → value entries, so an existing store keeps loading (and saving)
+    /// untouched.
+    #[test]
+    fn old_store_json_field_names_load_into_the_new_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.json");
+        let old = serde_json::json!({
+            "aliases": [{
+                "name": "mine",
+                "shortcuts": ["tt", "tw"],
+                "linux": "echo {input}",
+                "macos": null,
+                "args": { "here": "cd /tmp" },
+                "builtin": false
+            }],
+            "history": []
+        });
+        fs::write(&path, old.to_string()).unwrap();
+
+        let store = load(&path);
+        let def = &store.aliases[0];
+        assert_eq!(def.name, "mine");
+        assert_eq!(def.triggers, vec!["tt".to_string(), "tw".to_string()]);
+        assert_eq!(
+            def.shortcuts.get("here").map(String::as_str),
+            Some("cd /tmp")
+        );
+
+        // Saving again keeps the historical keys, so older builds can still
+        // read what this one writes.
+        save(&path, &store).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["aliases"][0]["shortcuts"][1], "tw");
+        assert_eq!(json["aliases"][0]["args"]["here"], "cd /tmp");
+        assert!(json["aliases"][0].get("triggers").is_none());
+    }
+
+    /// A store missing the map entirely (only triggers present) still loads:
+    /// `args` carries `#[serde(default)]`.
+    #[test]
+    fn missing_args_key_defaults_to_no_shortcuts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.json");
+        let old = serde_json::json!({
+            "aliases": [{
+                "name": "mine",
+                "shortcuts": ["tt"],
+                "linux": "echo {input}",
+                "macos": null,
+                "builtin": false
+            }],
+            "history": []
+        });
+        fs::write(&path, old.to_string()).unwrap();
+
+        let store = load(&path);
+        assert_eq!(store.aliases[0].triggers, vec!["tt".to_string()]);
+        assert!(store.aliases[0].shortcuts.is_empty());
     }
 
     #[test]

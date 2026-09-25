@@ -272,9 +272,9 @@ mod tests {
             Some(INPUT_BOX_H as usize + 1),
             "first list row under the box: {text}"
         );
-        assert!(text.contains("★ br ·"), "alias row: {text}");
+        assert!(text.contains("↳ br baidu ·"), "shortcut row: {text}");
         assert!(
-            text.contains("matches · 1 history · 1 alias"),
+            text.contains("matches · 1 history · 2 shortcut"),
             "list title: {text}"
         );
         assert!(text.contains("alt+d hide"), "key hints: {text}");

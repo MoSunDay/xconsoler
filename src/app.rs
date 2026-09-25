@@ -12,7 +12,7 @@ use crate::state::{self, App, Mode, Visibility};
 use crate::storage;
 
 /// Colon-command help shown for `:help` / unknown sub-commands.
-const COLON_HELP: &str = "\":add name[,short] <linux-cmd> [// <macos-cmd>]\" \u{b7} \":del name\" \u{b7} \":arg name key value\" \u{b7} \":unarg name key\"";
+const COLON_HELP: &str = "\":add name[,trigger] <linux-cmd> [// <macos-cmd>]\" \u{b7} \":del name\" \u{b7} \":arg name key value\" \u{b7} \":unarg name key\"";
 
 /// Apply an action in place. `path` is the store.json location used for saves.
 pub fn apply(app: &mut App, action: Action, platform: Platform, path: &Path) {
@@ -110,34 +110,36 @@ pub fn submit_colon(app: &mut App, path: &Path) {
                 None => app.status = Some((false, format!("alias not found: {name}"))),
             }
         }
-        Ok(Some(AliasOp::SetArg { name, key, value })) => {
+        Ok(Some(AliasOp::SetShortcut { name, key, value })) => {
             let canonical = alias::resolve(&app.aliases, &name).map(|d| d.name.clone());
             match canonical {
                 None => app.status = Some((false, format!("alias not found: {name}"))),
-                Some(cname) => match alias::set_arg(&mut app.store.aliases, &cname, &key, &value) {
-                    Ok(prev) => {
-                        rebuild_aliases(app);
-                        set_input(app, String::new());
-                        let verb = if prev.is_some() {
-                            "arg updated"
-                        } else {
-                            "arg added"
-                        };
-                        save_store(app, path, format!("{verb}: {cname} {key}"));
+                Some(cname) => {
+                    match alias::set_shortcut(&mut app.store.aliases, &cname, &key, &value) {
+                        Ok(prev) => {
+                            rebuild_aliases(app);
+                            set_input(app, String::new());
+                            let verb = if prev.is_some() {
+                                "shortcut updated"
+                            } else {
+                                "shortcut added"
+                            };
+                            save_store(app, path, format!("{verb}: {cname} {key}"));
+                        }
+                        Err(e) => app.status = Some((false, e)),
                     }
-                    Err(e) => app.status = Some((false, e)),
-                },
+                }
             }
         }
-        Ok(Some(AliasOp::DelArg { name, key })) => {
+        Ok(Some(AliasOp::DelShortcut { name, key })) => {
             let canonical = alias::resolve(&app.aliases, &name).map(|d| d.name.clone());
             match canonical {
                 None => app.status = Some((false, format!("alias not found: {name}"))),
-                Some(cname) => match alias::remove_arg(&mut app.store.aliases, &cname, &key) {
+                Some(cname) => match alias::remove_shortcut(&mut app.store.aliases, &cname, &key) {
                     Ok(()) => {
                         rebuild_aliases(app);
                         set_input(app, String::new());
-                        save_store(app, path, format!("arg removed: {cname} {key}"));
+                        save_store(app, path, format!("shortcut removed: {cname} {key}"));
                     }
                     Err(e) => app.status = Some((false, e)),
                 },
@@ -479,14 +481,17 @@ mod tests {
     }
 
     #[test]
-    fn named_arg_execute_resolves_value_and_records_raw_text() {
+    fn registered_shortcut_execute_resolves_value_and_records_raw_text() {
         let (mut app, _dir, path) = setup();
         shown(&mut app);
         type_str(&mut app, ":add t printf %s {input}", &path);
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
         type_str(&mut app, ":arg t here cd /tmp", &path);
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
-        assert_eq!(app.status, Some((true, "arg added: t here".to_string())));
+        assert_eq!(
+            app.status,
+            Some((true, "shortcut added: t here".to_string()))
+        );
 
         app.input = "t here".to_string();
         apply(&mut app, Action::Execute, Platform::Linux, &path);
@@ -500,28 +505,34 @@ mod tests {
 
         type_str(&mut app, ":unarg t here", &path);
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
-        assert_eq!(app.status, Some((true, "arg removed: t here".to_string())));
+        assert_eq!(
+            app.status,
+            Some((true, "shortcut removed: t here".to_string()))
+        );
         app.input = "t here".to_string();
         apply(&mut app, Action::Execute, Platform::Linux, &path);
         assert_eq!(app.status, Some((true, "t ok: here".to_string())));
     }
 
     #[test]
-    fn colon_arg_resolves_builtin_by_name() {
+    fn colon_shortcut_resolves_builtin_by_name() {
         let (mut app, _dir, path) = setup();
         shown(&mut app);
         type_str(&mut app, ":arg br gh https://github.com", &path);
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
-        assert_eq!(app.status, Some((true, "arg added: br gh".to_string())));
+        assert_eq!(
+            app.status,
+            Some((true, "shortcut added: br gh".to_string()))
+        );
         let def = alias::resolve(&app.aliases, "br").unwrap();
         assert_eq!(
-            def.args.get("gh").map(String::as_str),
+            def.shortcuts.get("gh").map(String::as_str),
             Some("https://github.com")
         );
         assert_eq!(
-            def.args.get("baidu").map(String::as_str),
+            def.shortcuts.get("baidu").map(String::as_str),
             Some("https://www.baidu.com"),
-            "override keeps br's registered builtin args"
+            "override keeps br's registered builtin shortcuts"
         );
         assert_eq!(
             app.store.aliases.len(),
@@ -532,7 +543,10 @@ mod tests {
         // Re-registering an existing key reports an update, not an add.
         type_str(&mut app, ":arg br gh https://gitlab.com", &path);
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
-        assert_eq!(app.status, Some((true, "arg updated: br gh".to_string())));
+        assert_eq!(
+            app.status,
+            Some((true, "shortcut updated: br gh".to_string()))
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! Candidate ranking: matching history first (newest first), aliases by fuzzy
-//! score filling only the slots history leaves.
+//! Candidate ranking: matching history first (newest first), then concrete
+//! registered shortcuts by fuzzy score filling only the slots history leaves.
 
 use crate::alias::{self, AliasDef};
 use crate::fuzzy;
@@ -8,15 +8,13 @@ use crate::storage::Store;
 /// A selectable completion candidate.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Candidate {
-    Alias {
-        name: String,
-    },
     History {
         idx: usize,
     },
-    /// Named-arg sub-candidate: the input is `<alias> <partial>` and `key`
-    /// is one of that alias's named arguments.
-    Arg {
+    /// Concrete registered shortcut: `key` is one of the alias's shortcuts
+    /// (`<alias> <partial>` narrows the list, a full-query hit offers them
+    /// directly).
+    Shortcut {
         alias: String,
         key: String,
     },
@@ -25,11 +23,12 @@ pub enum Candidate {
 /// Rank candidates for `query` (whitespace-trimmed).
 ///
 /// * Empty query: the most recent history entries only (newest first, no
-///   alias rows), up to `limit`.
-/// * Otherwise: history entries whose `"<label> <input>"` fuzzy-matches
+///   shortcut rows), up to `limit`.
+/// * Otherwise: history entries whose `"<entry label> <input>"` fuzzy-matches
 ///   `query` come first, in store order (newest first, no score sort); then
-///   aliases whose `"<name> <shortcuts>"` matches, by fuzzy score descending,
-///   ties by alias order. Aliases only fill the slots history leaves.
+///   every alias shortcut whose `"<name> <triggers> <key> <value>"` matches,
+///   by fuzzy score descending, ties by alias order then key order.
+///   Shortcuts only fill the slots history leaves.
 pub fn candidates(
     store: &Store,
     aliases: &[AliasDef],
@@ -39,7 +38,7 @@ pub fn candidates(
     let query = query.trim();
     if query.is_empty() {
         // Recent history only: an empty bar shows what was run last, never
-        // aliases (they come back as soon as a query character is typed).
+        // shortcuts (they come back as soon as a query character is typed).
         return (0..store.history.len().min(limit))
             .map(|idx| Candidate::History { idx })
             .collect();
@@ -60,37 +59,42 @@ pub fn candidates(
         .map(|(idx, _)| Candidate::History { idx })
         .collect();
 
-    // (score, alias order, candidate): only these rows get score-sorted.
-    let mut ranked: Vec<(i32, usize, Candidate)> = aliases
+    // (score, alias order, key, candidate): only these rows get score-sorted.
+    let mut ranked: Vec<(i32, usize, String, Candidate)> = aliases
         .iter()
         .enumerate()
-        .filter_map(|(order, def)| {
-            let haystack = format!("{} {}", def.name, def.shortcuts.join(" "));
-            fuzzy::score(query, &haystack).map(|s| {
-                (
-                    s,
-                    order,
-                    Candidate::Alias {
-                        name: def.name.clone(),
-                    },
-                )
+        .flat_map(|(order, def)| {
+            def.shortcuts.iter().filter_map(move |(key, value)| {
+                let haystack = format!("{} {} {} {}", def.name, def.triggers.join(" "), key, value);
+                fuzzy::score(query, &haystack).map(|s| {
+                    (
+                        s,
+                        order,
+                        key.clone(),
+                        Candidate::Shortcut {
+                            alias: def.name.clone(),
+                            key: key.clone(),
+                        },
+                    )
+                })
             })
         })
         .collect();
-    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
 
     history
         .into_iter()
-        .chain(ranked.into_iter().map(|t| t.2))
+        .chain(ranked.into_iter().map(|t| t.3))
         .take(limit)
         .collect()
 }
 
-/// Named-arg sub-candidates for a raw input of the form `<trigger> <partial>`.
-/// A bare `br` (no whitespace yet) keeps the normal history/alias ranking;
-/// once there is a space the alias's args take over, ranked by fuzzy score on
-/// the key (every key when the partial is empty), ties by key order.
-pub fn arg_candidates(aliases: &[AliasDef], input: &str, limit: usize) -> Vec<Candidate> {
+/// Concrete-shortcut sub-candidates for a raw input of the form
+/// `<alias> <partial>`. A bare `br` (no whitespace yet) keeps the normal
+/// history ranking; once there is a space the alias's shortcuts take over,
+/// ranked by fuzzy score on the key (every key when the partial is empty),
+/// ties by key order.
+pub fn shortcut_candidates(aliases: &[AliasDef], input: &str, limit: usize) -> Vec<Candidate> {
     let mut parts = input.splitn(2, char::is_whitespace);
     let head = parts.next().unwrap_or("");
     let Some(rest) = parts.next() else {
@@ -99,12 +103,12 @@ pub fn arg_candidates(aliases: &[AliasDef], input: &str, limit: usize) -> Vec<Ca
     let Some(def) = alias::resolve(aliases, head) else {
         return Vec::new();
     };
-    if def.args.is_empty() {
+    if def.shortcuts.is_empty() {
         return Vec::new();
     }
     let partial = rest.trim();
     let mut scored: Vec<(i32, &String)> = def
-        .args
+        .shortcuts
         .keys()
         .filter_map(|k| {
             if partial.is_empty() {
@@ -118,7 +122,7 @@ pub fn arg_candidates(aliases: &[AliasDef], input: &str, limit: usize) -> Vec<Ca
     scored
         .into_iter()
         .take(limit)
-        .map(|(_, k)| Candidate::Arg {
+        .map(|(_, k)| Candidate::Shortcut {
             alias: def.name.clone(),
             key: k.clone(),
         })
@@ -134,41 +138,44 @@ mod tests {
         HistoryEntry::new(alias, input, ts)
     }
 
-    fn with_args() -> Vec<AliasDef> {
+    fn with_shortcuts() -> Vec<AliasDef> {
         let mut def = alias::defaults().remove(0); // br (builtin)
-        def.args.clear(); // fixture: exactly the args below
-        def.args
+        def.shortcuts.clear(); // fixture: exactly the shortcuts below
+        def.shortcuts
             .insert("baidu".to_string(), "https://www.baidu.com".to_string());
-        def.args
+        def.shortcuts
             .insert("gh".to_string(), "https://github.com".to_string());
         vec![def]
     }
 
     #[test]
-    fn arg_candidates_need_a_space_after_the_trigger() {
-        let aliases = with_args();
-        assert!(arg_candidates(&aliases, "br", 8).is_empty(), "bare alias");
+    fn shortcut_candidates_need_a_space_after_the_trigger() {
+        let aliases = with_shortcuts();
         assert!(
-            arg_candidates(&aliases, "nope x", 8).is_empty(),
+            shortcut_candidates(&aliases, "br", 8).is_empty(),
+            "bare alias"
+        );
+        assert!(
+            shortcut_candidates(&aliases, "nope x", 8).is_empty(),
             "unknown head"
         );
         assert!(
-            arg_candidates(&alias::defaults(), "cd x", 8).is_empty(),
-            "no args"
+            shortcut_candidates(&alias::defaults(), "cd x", 8).is_empty(),
+            "no shortcuts"
         );
     }
 
     #[test]
-    fn arg_candidates_list_and_filter_keys() {
-        let aliases = with_args();
+    fn shortcut_candidates_list_and_filter_keys() {
+        let aliases = with_shortcuts();
         assert_eq!(
-            arg_candidates(&aliases, "br ", 8),
+            shortcut_candidates(&aliases, "br ", 8),
             vec![
-                Candidate::Arg {
+                Candidate::Shortcut {
                     alias: "br".to_string(),
                     key: "baidu".to_string()
                 },
-                Candidate::Arg {
+                Candidate::Shortcut {
                     alias: "br".to_string(),
                     key: "gh".to_string()
                 },
@@ -176,20 +183,24 @@ mod tests {
             "empty partial lists every key, ties by key order"
         );
         assert_eq!(
-            arg_candidates(&aliases, "br bai", 8),
-            vec![Candidate::Arg {
+            shortcut_candidates(&aliases, "br bai", 8),
+            vec![Candidate::Shortcut {
                 alias: "br".to_string(),
                 key: "baidu".to_string()
             }]
         );
         assert!(
-            arg_candidates(&aliases, "br zzz", 8).is_empty(),
+            shortcut_candidates(&aliases, "br zzz", 8).is_empty(),
             "no key matches"
         );
-        assert_eq!(arg_candidates(&aliases, "br ", 1).len(), 1, "limit applies");
+        assert_eq!(
+            shortcut_candidates(&aliases, "br ", 1).len(),
+            1,
+            "limit applies"
+        );
     }
 
-    /// Empty input shows the recent history only - no alias rows, even
+    /// Empty input shows the recent history only - no shortcut rows, even
     /// though the limit would leave room for them. Whitespace counts as
     /// empty.
     #[test]
@@ -205,8 +216,8 @@ mod tests {
             vec![Candidate::History { idx: 0 }, Candidate::History { idx: 1 },]
         );
         assert!(
-            out.iter().all(|c| !matches!(c, Candidate::Alias { .. })),
-            "aliases stay out of the empty-input list: {out:?}"
+            out.iter().all(|c| !matches!(c, Candidate::Shortcut { .. })),
+            "shortcuts stay out of the empty-input list: {out:?}"
         );
     }
 
@@ -244,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn newer_history_outranks_older_and_alias() {
+    fn newer_history_outranks_older_and_shortcuts() {
         let mut store = Store::default();
         store.history.push(history("br", "newest", 20));
         store.history.push(history("br", "older", 10));
@@ -254,8 +265,13 @@ mod tests {
             vec![
                 Candidate::History { idx: 0 },
                 Candidate::History { idx: 1 },
-                Candidate::Alias {
-                    name: "br".to_string()
+                Candidate::Shortcut {
+                    alias: "br".to_string(),
+                    key: "baidu".to_string()
+                },
+                Candidate::Shortcut {
+                    alias: "br".to_string(),
+                    key: "gm".to_string()
                 },
             ]
         );
@@ -271,14 +287,21 @@ mod tests {
         let out = candidates(&store, &alias::defaults(), "gm", 10);
         assert_eq!(
             out,
-            vec![Candidate::History { idx: 0 }, Candidate::History { idx: 1 }]
+            vec![
+                Candidate::History { idx: 0 },
+                Candidate::History { idx: 1 },
+                Candidate::Shortcut {
+                    alias: "br".to_string(),
+                    key: "gm".to_string()
+                },
+            ]
         );
     }
 
-    /// Aliases only fill the slots history leaves: with one matching history
-    /// entry, `limit = 1` hides the alias and `limit = 2` shows it after.
+    /// Shortcuts only fill the slots history leaves: with one matching
+    /// history entry, `limit = 1` hides them and `limit = 2` shows the first.
     #[test]
-    fn aliases_only_fill_the_slots_history_leaves() {
+    fn shortcuts_only_fill_the_slots_history_leaves() {
         let mut store = Store::default();
         store.history.push(history("br", "baidu", 1));
         let aliases = alias::defaults();
@@ -291,36 +314,60 @@ mod tests {
             candidates(&store, &aliases, "br", 2),
             vec![
                 Candidate::History { idx: 0 },
-                Candidate::Alias {
-                    name: "br".to_string()
+                Candidate::Shortcut {
+                    alias: "br".to_string(),
+                    key: "baidu".to_string()
                 },
             ]
         );
     }
 
-    /// Fuzzy-typing `b` / `c` resolves to exactly the `br` / `cd` builtins;
-    /// a trailing space (`br ` / `cd ` before Enter) changes nothing.
+    /// Only concrete registered shortcuts become rows: a single letter can
+    /// hit several rows (the alias name is part of every haystack), `baidu`
+    /// hits only the baidu row, while plain aliases (`cd`) yield nothing.
     #[test]
-    fn single_letter_query_matches_exactly_one_builtin() {
+    fn single_letter_query_matches_concrete_shortcuts_only() {
         let store = Store::default();
-        for query in ["b", "br", "br "] {
-            assert_eq!(
-                candidates(&store, &alias::defaults(), query, 5),
-                vec![Candidate::Alias {
-                    name: "br".to_string()
-                }],
-                "query {query:?}"
-            );
-        }
-        for query in ["c", "cd", "cd "] {
-            assert_eq!(
-                candidates(&store, &alias::defaults(), query, 5),
-                vec![Candidate::Alias {
-                    name: "cd".to_string()
-                }],
-                "query {query:?}"
-            );
-        }
+        assert_eq!(
+            candidates(&store, &alias::defaults(), "b", 5),
+            vec![
+                Candidate::Shortcut {
+                    alias: "br".to_string(),
+                    key: "baidu".to_string()
+                },
+                Candidate::Shortcut {
+                    alias: "br".to_string(),
+                    key: "gm".to_string()
+                },
+            ],
+            "the alias name makes every br row carry a 'b'"
+        );
+        assert_eq!(
+            candidates(&store, &alias::defaults(), "baidu", 5),
+            vec![Candidate::Shortcut {
+                alias: "br".to_string(),
+                key: "baidu".to_string()
+            }],
+            "only the baidu key/value matches its own name"
+        );
+        assert_eq!(
+            candidates(&store, &alias::defaults(), "br", 5),
+            vec![
+                Candidate::Shortcut {
+                    alias: "br".to_string(),
+                    key: "baidu".to_string()
+                },
+                Candidate::Shortcut {
+                    alias: "br".to_string(),
+                    key: "gm".to_string()
+                },
+            ],
+            "both br urls are hit, key order breaks the score tie"
+        );
+        assert!(
+            candidates(&store, &alias::defaults(), "cd", 5).is_empty(),
+            "bare aliases without concrete shortcuts never become rows"
+        );
     }
 
     #[test]
