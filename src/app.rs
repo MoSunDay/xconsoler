@@ -30,7 +30,11 @@ pub fn apply(app: &mut App, action: Action, platform: Platform, path: &Path) {
             app.status = None;
         }
         Action::OpenPalette => {
-            app.palette = Some(0);
+            app.palette = if commands::palette_items(&app.input).is_empty() {
+                None
+            } else {
+                Some(0)
+            };
             app.status = None;
         }
         Action::ClosePalette => app.palette = None,
@@ -50,12 +54,34 @@ pub fn apply(app: &mut App, action: Action, platform: Platform, path: &Path) {
     }
 }
 
-/// Apply one textedit result: replace input+caret, close the palette and
-/// reset the candidate cursor / transient status like [`set_input`].
+/// Apply one textedit result: replace input+caret, then keep the palette in
+/// step with the new text (see [`sync_palette`]). Resets the candidate cursor
+/// / transient status like [`set_input`].
 fn edit(app: &mut App, out: (String, usize)) {
     let (s, caret) = out;
-    app.palette = None;
+    let old = app.input.clone();
+    let was_open = app.palette.is_some();
     set_input_at(app, s, caret);
+    sync_palette(app, &old, was_open);
+}
+
+/// Follow the input with the palette: a `/` query owns the list (`/` opens
+/// it, more text re-ranks it, deleting the `/` closes it), a still-matching
+/// `:` query keeps an open list alive, and plain text - or a query with no
+/// hits - closes it.
+fn sync_palette(app: &mut App, old_input: &str, was_open: bool) {
+    if old_input.starts_with('/') && !app.input.starts_with('/') {
+        app.palette = None;
+        return;
+    }
+    let items = commands::palette_items(&app.input);
+    let open = !items.is_empty()
+        && (app.input.starts_with('/') || (was_open && app.input.starts_with(':')));
+    if !open {
+        app.palette = None;
+        return;
+    }
+    app.palette = Some(app.palette.unwrap_or(0).min(items.len() - 1));
 }
 
 /// Target resolution via the selected candidate. `Err` carries the message
@@ -95,13 +121,6 @@ pub fn submit_colon(app: &mut App, path: &Path) {
             save_store(app, path, format!("alias added: {label}"));
         }
         Ok(Some(AliasOp::Remove(name))) => {
-            if alias::defaults().iter().any(|d| d.name == name) {
-                app.status = Some((
-                    false,
-                    "builtin alias cannot be deleted (override with :add)".to_string(),
-                ));
-                return;
-            }
             match app.store.aliases.iter().position(|d| d.name == name) {
                 Some(i) => {
                     app.store.aliases.remove(i);
@@ -175,10 +194,17 @@ pub fn submit_colon(app: &mut App, path: &Path) {
     }
 }
 
-/// Submit a `/` command. Only `/settings` exists today; unknown ones keep
-/// the input (the help block above the bar lists what is available).
+/// Submit a `/` command: an exact catalog token wins, otherwise the best
+/// fuzzy match runs (so Enter still works after Esc closed the list).
+/// `/settings` opens the settings page; unknown commands keep today's status.
 pub(crate) fn submit_slash(app: &mut App, line: &str) {
-    if line == "/settings" {
+    let line = line.trim();
+    let token = commands::ALL
+        .iter()
+        .find(|c| c.token == line)
+        .or_else(|| commands::matching(line).into_iter().next())
+        .map(|c| c.token);
+    if token == Some("/settings") {
         set_input(app, String::new());
         app.mode = Mode::Settings(Box::new(settings::new()));
     } else {
@@ -229,7 +255,7 @@ fn move_selection(app: &mut App, delta: i32) {
     let Some(cur) = app.palette else {
         return move_sel(app, delta);
     };
-    let len = commands::len();
+    let len = commands::palette_items(&app.input).len();
     if len == 0 {
         app.palette = Some(0);
         return;
@@ -238,15 +264,19 @@ fn move_selection(app: &mut App, delta: i32) {
     app.palette = Some((cur + delta).clamp(0, len as i32 - 1) as usize);
 }
 
-/// Enter on an open palette: complete commands (`:help`, `/settings`) run
-/// immediately, arg-taking ones prefill the input (`:add `). Closes either way.
+/// Enter on an open palette: rows come from the current `:`/`/` query, so
+/// complete commands (`:help`, `/settings`) run immediately and arg-taking
+/// ones prefill the input (`:add `). Closes either way.
 fn palette_accept(app: &mut App, path: &Path) {
-    let Some(spec) = app.palette.and_then(commands::get).copied() else {
+    let Some(spec) = app
+        .palette
+        .and_then(|i| commands::palette_items(&app.input).get(i).copied())
+    else {
         app.palette = None;
         return;
     };
     app.palette = None;
-    let text = commands::insert_text(&spec);
+    let text = commands::insert_text(spec);
     set_input(app, text.clone());
     if spec.needs_arg {
         return;
@@ -258,9 +288,9 @@ fn palette_accept(app: &mut App, path: &Path) {
     }
 }
 
-/// Recompute the effective alias list after a store mutation.
+/// Recompute the alias view after a store mutation.
 fn rebuild_aliases(app: &mut App) {
-    app.aliases = storage::merge_aliases(&app.store.aliases);
+    app.aliases = app.store.aliases.clone();
 }
 
 #[cfg(test)]
@@ -310,10 +340,8 @@ mod tests {
         );
         // The mirror is persisted, so a reload keeps working on macOS.
         let reloaded = storage::load(&path);
-        assert_eq!(
-            reloaded.aliases[0].macos.as_deref(),
-            Some("printf %s {input}")
-        );
+        let def = reloaded.aliases.iter().find(|d| d.name == "t").unwrap();
+        assert_eq!(def.macos.as_deref(), Some("printf %s {input}"));
 
         app.input = "t hi".to_string();
         apply(&mut app, Action::Execute, Platform::Macos, &path);
@@ -383,10 +411,11 @@ mod tests {
     fn submit_colon_del_and_errors() {
         let (mut app, _dir, path) = setup();
         shown(&mut app);
+        assert_eq!(app.store.aliases, alias::defaults(), "setup is seeded");
 
         type_str(&mut app, ":add t echo {input}", &path);
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
-        assert_eq!(app.store.aliases.len(), 1);
+        assert_eq!(app.store.aliases.len(), 3);
 
         // unknown command -> usage help, input kept
         type_str(&mut app, ":frobnicate", &path);
@@ -400,22 +429,22 @@ mod tests {
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
         assert!(!app.status.as_ref().unwrap().0);
 
-        // builtin delete refused
+        // the seeded `br` is an ordinary stored alias: it deletes like any other
         app.input = ":del br".to_string();
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
-        assert_eq!(
-            app.status,
-            Some((
-                false,
-                "builtin alias cannot be deleted (override with :add)".to_string()
-            ))
+        assert_eq!(app.status, Some((true, "alias removed: br".to_string())));
+        assert!(!app.aliases.iter().any(|d| d.name == "br"), "view follows");
+        assert!(
+            !storage::load(&path).aliases.iter().any(|d| d.name == "br"),
+            "deletion persisted"
         );
 
         // unknown user alias
         app.input = ":del t".to_string(); // still exists
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
         assert_eq!(app.status, Some((true, "alias removed: t".to_string())));
-        assert!(app.store.aliases.is_empty());
+        assert_eq!(app.store.aliases.len(), 1, "only the other seed remains");
+        assert_eq!(app.store.aliases[0].name, "cd");
 
         app.input = ":del t".to_string();
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
@@ -461,12 +490,15 @@ mod tests {
         let (mut app, _dir, path) = setup();
         shown(&mut app);
 
-        app.palette = Some(4); // :help
+        app.palette = Some(4); // :help (plain catalog: empty input)
         apply(&mut app, Action::PaletteAccept, Platform::Linux, &path);
         assert_eq!(app.palette, None);
         let (ok, msg) = app.status.clone().expect(":help sets the usage status");
         assert!(ok && msg.contains(":add"));
 
+        // The first accept left `:help` in the bar; reset to the plain
+        // catalog before selecting the last row.
+        app.input = String::new();
         app.palette = Some(6); // /settings
         apply(&mut app, Action::PaletteAccept, Platform::Linux, &path);
         assert_eq!(app.palette, None);
@@ -555,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn colon_shortcut_resolves_builtin_by_name() {
+    fn colon_shortcut_resolves_seeded_alias_by_name() {
         let (mut app, _dir, path) = setup();
         shown(&mut app);
         type_str(&mut app, ":arg br gh https://github.com", &path);
@@ -572,14 +604,10 @@ mod tests {
         assert_eq!(
             def.shortcuts.get("baidu").map(String::as_str),
             Some("https://www.baidu.com"),
-            "override keeps br's registered builtin shortcuts"
+            "the seeded shortcuts stay put"
         );
-        assert_eq!(
-            app.store.aliases.len(),
-            1,
-            "builtin materialized as override"
-        );
-        assert!(!app.store.aliases[0].builtin);
+        assert!(def.linux.is_some(), "the seeded command stays put");
+        assert_eq!(app.store.aliases.len(), 2, "edited in place, not copied");
         // Re-registering an existing key reports an update, not an add.
         type_str(&mut app, ":arg br gh https://gitlab.com", &path);
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
@@ -607,14 +635,18 @@ mod tests {
     fn unknown_slash_command_keeps_input_and_points_at_settings() {
         let (mut app, _dir, path) = setup();
         shown(&mut app);
-        app.input = "/nope".to_string();
+        // `/zz` has no fuzzy match at all; `/nope` would resolve `/settings`.
+        app.input = "/zz".to_string();
         apply(&mut app, Action::Execute, Platform::Linux, &path);
         assert!(matches!(app.mode, Mode::Normal));
-        assert_eq!(app.input, "/nope");
-        assert!(app
-            .status
-            .as_ref()
-            .is_some_and(|(ok, m)| !ok && m.contains("/settings")));
+        assert_eq!(app.input, "/zz");
+        assert_eq!(
+            app.status,
+            Some((
+                false,
+                "unknown command: /zz \u{b7} try /settings".to_string()
+            ))
+        );
     }
 
     #[test]
@@ -626,7 +658,7 @@ mod tests {
 
         app.input = "/settings".to_string();
         apply(&mut app, Action::Execute, Platform::Linux, &path);
-        // merged rows: br(0), cd(1), t(2)
+        // stored rows: br(0), cd(1), t(2)
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         apply_settings(&mut app, down, &path);
         apply_settings(&mut app, down, &path);
@@ -635,9 +667,10 @@ mod tests {
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
             &path,
         );
-        assert!(app.store.aliases.is_empty(), "user alias deleted");
+        assert_eq!(app.store.aliases.len(), 2, "only t was deleted");
+        assert!(app.store.aliases.iter().all(|d| d.name != "t"));
         assert!(
-            storage::load(&path).aliases.is_empty(),
+            storage::load(&path).aliases.iter().all(|d| d.name != "t"),
             "deletion persisted"
         );
         let Mode::Settings(st) = &app.mode else {
@@ -685,7 +718,6 @@ mod tests {
         assert!(ok, "{msg}");
         assert_eq!(msg, "imported 2 chrome bookmarks into br");
         let br = app.aliases.iter().find(|d| d.name == "br").unwrap();
-        assert!(!br.builtin, "the builtin was overridden in place");
         assert_eq!(
             br.shortcuts.get("rust").map(String::as_str),
             Some("https://www.rust-lang.org/")
@@ -694,7 +726,7 @@ mod tests {
             br.shortcuts.get("docs").map(String::as_str),
             Some("https://doc.rust-lang.org/")
         );
-        // Pre-existing builtin keys survive the import.
+        // Pre-existing seeded keys survive the import.
         assert_eq!(
             br.shortcuts.get("baidu").map(String::as_str),
             Some("https://www.baidu.com")
@@ -704,10 +736,9 @@ mod tests {
             Some("https://mail.google.com")
         );
 
-        // The change reached the store: a fresh load carries the override.
+        // The change reached the store: a fresh load carries the edit.
         let reloaded = storage::load(&path);
         let br = reloaded.aliases.iter().find(|d| d.name == "br").unwrap();
-        assert!(!br.builtin);
         assert_eq!(br.shortcuts.len(), 4);
 
         // Second run imports nothing new (no key is ever overwritten).
@@ -717,7 +748,7 @@ mod tests {
             app.status,
             Some((true, "imported 0 chrome bookmarks into br".to_string()))
         );
-        assert_eq!(app.store.aliases.len(), 1, "still one user alias");
+        assert_eq!(app.store.aliases.len(), 2, "no duplicate aliases appear");
 
         // Unknown alias: clear error, nothing imported.
         app.input = ":import-chrome ghost".to_string();
@@ -744,3 +775,6 @@ mod tests {
 
 #[cfg(test)]
 mod edit_tests;
+
+#[cfg(test)]
+mod slash_palette_tests;

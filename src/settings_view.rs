@@ -27,7 +27,7 @@ const HINT_SEGMENTS: [&str; 9] = [
     "Enter/→ expand",
     "← collapse",
     "n new alias",
-    "e edit cmds",
+    "e edit row",
     "s add shortcut",
     "t add trigger",
     "d delete",
@@ -92,6 +92,12 @@ fn form_title(f: &Form) -> String {
         Purpose::EditCommand { alias } => {
             format!("edit commands for '{alias}' ({}/{})", f.step + 1, n)
         }
+        Purpose::EditShortcut { alias, old_key } => {
+            format!("edit shortcut {alias}.{old_key} ({}/{})", f.step + 1, n)
+        }
+        Purpose::EditTrigger { alias, .. } => {
+            format!("edit trigger '{alias}' ({}/{})", f.step + 1, n)
+        }
     }
 }
 
@@ -102,11 +108,15 @@ fn form_prompt(f: &Form) -> String {
         (Purpose::NewAlias, 1) => "triggers (comma-separated, empty ok)".to_string(),
         (Purpose::NewAlias, 2) => "linux command — use {input} where the input goes".to_string(),
         (Purpose::NewAlias, 3) => "macos command (empty = same as linux)".to_string(),
-        (Purpose::NewShortcut { alias }, 0) => {
+        (Purpose::NewShortcut { alias } | Purpose::EditShortcut { alias, .. }, 0) => {
             format!("shortcut key for '{alias}' (one word)")
         }
-        (Purpose::NewShortcut { .. }, 1) => "shortcut value (spaces allowed)".to_string(),
-        (Purpose::NewTrigger { .. }, 0) => "trigger (one word, a-z 0-9 - _)".to_string(),
+        (Purpose::NewShortcut { .. } | Purpose::EditShortcut { .. }, 1) => {
+            "shortcut value (spaces allowed)".to_string()
+        }
+        (Purpose::NewTrigger { .. } | Purpose::EditTrigger { .. }, 0) => {
+            "trigger (one word, a-z 0-9 - _)".to_string()
+        }
         (Purpose::EditCommand { .. }, 0) => {
             "linux command — use {input} where the input goes".to_string()
         }
@@ -379,7 +389,6 @@ mod tests {
             shortcuts: [("baidu".to_string(), "https://www.baidu.com".to_string())]
                 .into_iter()
                 .collect(),
-            builtin: false,
         });
         let aliases = settings::view(&store);
         (store, aliases)
@@ -394,7 +403,6 @@ mod tests {
             linux: Some("ls".to_string()),
             macos: Some("open -a Finder".to_string()),
             shortcuts: Default::default(),
-            builtin: false,
         });
         let aliases = settings::view(&store);
         let text = draw_wide(&settings::new(), &aliases);
@@ -421,7 +429,7 @@ mod tests {
         assert!(text.contains("cd"));
         assert!(text.contains("printf %s {input}"));
         assert!(text.contains("n new alias"));
-        assert!(text.contains("e edit cmds"));
+        assert!(text.contains("e edit row"));
     }
 
     #[test]
@@ -433,7 +441,7 @@ mod tests {
             "Enter/→ expand",
             "← collapse",
             "n new alias",
-            "e edit cmds",
+            "e edit row",
             "s add shortcut",
             "t add trigger",
             "d delete",
@@ -535,7 +543,6 @@ mod tests {
             linux: Some("printf %s {input}".to_string()),
             macos: None,
             shortcuts: Default::default(),
-            builtin: false,
         });
         let aliases = settings::view(&store);
         let text = draw_wide(&settings::new(), &aliases);
@@ -556,7 +563,6 @@ mod tests {
             linux: Some(long.clone()),
             macos: Some(long.clone()),
             shortcuts: Default::default(),
-            builtin: false,
         });
         let aliases = settings::view(&store);
         let text = draw_wide(&settings::new(), &aliases);
@@ -717,6 +723,42 @@ mod tests {
         let text = draw_wide(&st, &aliases);
         assert!(text.contains("new trigger (1/1)"));
         assert!(text.contains("trigger (one word"));
+    }
+
+    #[test]
+    fn edit_shortcut_form_shows_the_key_then_value_steps() {
+        let (_store, aliases) = t_store();
+        let mut st = settings::new();
+        let mut form = settings_form::new_edit_shortcut("t", "baidu", "https://www.baidu.com");
+        st.form = Some(form.clone());
+        let text = draw_wide(&st, &aliases);
+        assert!(text.contains("edit shortcut t.baidu (1/2)"));
+        assert!(text.contains("shortcut key for 't' (one word)"));
+        assert!(text.contains("❯ baidu"), "the current key is prefilled");
+
+        form.step = 1;
+        // `advance` prefills step 1 with the current value (see `prefill`).
+        form.input = "https://www.baidu.com".to_string();
+        form.caret = form.input.chars().count();
+        st.form = Some(form);
+        let text = draw_wide(&st, &aliases);
+        assert!(text.contains("edit shortcut t.baidu (2/2)"));
+        assert!(text.contains("shortcut value (spaces allowed)"));
+        assert!(
+            text.contains("❯ https://www.baidu.com"),
+            "the current value is prefilled"
+        );
+    }
+
+    #[test]
+    fn edit_trigger_form_shows_the_rename_title_and_prompt() {
+        let (_store, aliases) = t_store();
+        let mut st = settings::new();
+        st.form = Some(settings_form::new_edit_trigger("t", "tt"));
+        let text = draw_wide(&st, &aliases);
+        assert!(text.contains("edit trigger 't' (1/1)"));
+        assert!(text.contains("trigger (one word"));
+        assert!(text.contains("❯ tt"), "the current word is prefilled");
     }
 
     #[test]

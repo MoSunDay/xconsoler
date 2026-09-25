@@ -94,7 +94,6 @@ fn parse_add(rest: &[&str]) -> Result<Option<AliasOp>, String> {
         linux,
         macos,
         shortcuts: BTreeMap::new(),
-        builtin: false,
     })))
 }
 
@@ -211,7 +210,6 @@ mod tests {
                 assert_eq!(def.triggers, vec!["ma".to_string()]);
                 assert_eq!(def.linux.as_deref(), Some("echo {input}"));
                 assert_eq!(def.macos.as_deref(), Some("say {input}"));
-                assert!(!def.builtin);
             }
             other => panic!("expected Add, got {other:?}"),
         }

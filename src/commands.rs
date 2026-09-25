@@ -71,6 +71,33 @@ pub fn insert_text(c: &CommandSpec) -> String {
     }
 }
 
+/// Catalog rows matching `query`, best score first. The haystack is
+/// `"{token} {desc}"`; an empty query keeps the whole catalog. The sort is
+/// stable, so equal scores keep catalog order.
+pub fn matching(query: &str) -> Vec<&'static CommandSpec> {
+    if query.trim().is_empty() {
+        return ALL.iter().collect();
+    }
+    let mut ranked: Vec<(i32, &'static CommandSpec)> = ALL
+        .iter()
+        .filter_map(|c| {
+            crate::fuzzy::score(query, &format!("{} {}", c.token, c.desc)).map(|s| (s, c))
+        })
+        .collect();
+    ranked.sort_by_key(|r| std::cmp::Reverse(r.0)); // stable: ties keep catalog order
+    ranked.into_iter().map(|(_, c)| c).collect()
+}
+
+/// Rows the palette shows for `input`: a `:`/`/` line is a query (ranked
+/// matches), anything else - empty included - means the plain catalog.
+pub fn palette_items(input: &str) -> Vec<&'static CommandSpec> {
+    if input.starts_with('/') || input.starts_with(':') {
+        matching(input)
+    } else {
+        ALL.iter().collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +155,69 @@ mod tests {
         assert_eq!(insert_text(&ALL[i]), ":import-chrome ");
         assert_eq!(ALL[i + 1].token, "/settings", "inserted before /settings");
         assert_eq!(get(i).map(|c| c.token), Some(":import-chrome"));
+    }
+
+    fn tokens(items: &[&CommandSpec]) -> Vec<&'static str> {
+        items.iter().map(|c| c.token).collect()
+    }
+
+    #[test]
+    fn an_exact_slash_token_matches_only_itself() {
+        let hits = matching("/settings");
+        assert_eq!(tokens(&hits), vec!["/settings"]);
+        assert!(matching("/zz").is_empty(), "no fuzzy hit for /zz");
+        assert!(matching("/abc").is_empty(), "no fuzzy hit for /abc");
+    }
+
+    #[test]
+    fn a_partial_query_ranks_the_closest_token_first() {
+        let hits = matching("/set");
+        assert_eq!(tokens(&hits), vec!["/settings"]);
+        assert_eq!(hits[0].desc, "open the settings page");
+    }
+
+    #[test]
+    fn colon_a_ranks_the_arg_commands_above_the_mid_word_hits() {
+        let hits = matching(":a");
+        let pos = |t: &str| hits.iter().position(|c| c.token == t).unwrap_or(usize::MAX);
+        // `:add`/`:arg` hit the 'a' right after ':' (consecutive bonus) while
+        // `:unarg`, `:help` and `:import-chrome` only match 'a' mid-word.
+        assert!(pos(":add") < pos(":unarg"), "{:?}", tokens(&hits));
+        assert!(pos(":arg") < pos(":unarg"), "{:?}", tokens(&hits));
+        assert!(pos(":add") < pos(":help"), "{:?}", tokens(&hits));
+        assert!(pos(":arg") < pos(":import-chrome"), "{:?}", tokens(&hits));
+        assert!(pos(":add") < pos(":arg"), "ties keep catalog order");
+        assert!(!hits.iter().any(|c| c.token == "/settings"));
+    }
+
+    #[test]
+    fn matching_is_case_insensitive() {
+        assert_eq!(tokens(&matching("/SETTING")), tokens(&matching("/setting")));
+        assert_eq!(tokens(&matching(":HELP")), vec![":help"]);
+    }
+
+    #[test]
+    fn an_empty_query_yields_the_whole_catalog() {
+        assert_eq!(
+            tokens(&matching("")),
+            tokens(&ALL.iter().collect::<Vec<_>>())
+        );
+        assert_eq!(
+            tokens(&matching("   ")),
+            tokens(&ALL.iter().collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn palette_items_filter_only_on_a_prefixed_query() {
+        let all = tokens(&ALL.iter().collect::<Vec<_>>());
+        assert_eq!(tokens(&palette_items("br")), all, "plain text: catalog");
+        assert_eq!(tokens(&palette_items("")), all, "empty: catalog");
+        assert_eq!(
+            tokens(&palette_items("/")),
+            vec!["/settings"],
+            "a bare slash is a query"
+        );
+        assert!(palette_items("/zz").is_empty(), "no hits, no rows");
     }
 }

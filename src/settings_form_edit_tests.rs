@@ -234,3 +234,149 @@ fn prefill_and_advance_leave_the_caret_at_the_end() {
     assert_eq!(out, FormOutcome::Active, "invalid name stays on the step");
     assert_eq!((f.input.as_str(), f.caret), ("bad!", 4));
 }
+
+#[test]
+fn edit_shortcut_prefills_both_steps_and_enter_accepts_them() {
+    let store = empty_store();
+    let f = new_edit_shortcut("t", "baidu", "https://www.baidu.com");
+    assert_eq!(
+        f.purpose,
+        Purpose::EditShortcut {
+            alias: "t".to_string(),
+            old_key: "baidu".to_string()
+        }
+    );
+    assert_eq!(f.input, "baidu", "step 0 is the current key");
+    assert_eq!(f.caret, f.input.chars().count());
+    assert_eq!(step_count(&f), 2);
+
+    // Enter accepts the prefilled key; the value step starts prefilled.
+    let (f, out) = enter(&f, &store);
+    assert_eq!(out, FormOutcome::Active);
+    assert_eq!(f.step, 1);
+    assert_eq!(f.shortcut_key, "baidu");
+    assert_eq!((f.input.as_str(), f.caret), ("https://www.baidu.com", 21));
+
+    let (f, out) = enter(&f, &store);
+    assert_eq!(f.error, None);
+    match out {
+        FormOutcome::Submit(Submission::EditShortcut {
+            alias,
+            old_key,
+            key,
+            value,
+        }) => {
+            assert_eq!((alias.as_str(), old_key.as_str()), ("t", "baidu"));
+            assert_eq!(
+                (key.as_str(), value.as_str()),
+                ("baidu", "https://www.baidu.com")
+            );
+        }
+        other => panic!("expected Submit, got {other:?}"),
+    }
+}
+
+#[test]
+fn edit_shortcut_rewrites_both_fields() {
+    let store = empty_store();
+    let f = new_edit_shortcut("t", "baidu", "https://www.baidu.com");
+    let (f, _) = handle_key(&f, &store, ctrl('u'));
+    let f = type_str(&f, "tieba", &store);
+    let (f, _) = enter(&f, &store);
+    let (f, _) = handle_key(&f, &store, ctrl('u'));
+    let f = type_str(&f, "https://tieba.baidu.com", &store);
+    let (_, out) = enter(&f, &store);
+    match out {
+        FormOutcome::Submit(Submission::EditShortcut {
+            old_key,
+            key,
+            value,
+            ..
+        }) => {
+            assert_eq!(old_key, "baidu", "the original key travels along");
+            assert_eq!(key, "tieba");
+            assert_eq!(value, "https://tieba.baidu.com");
+        }
+        other => panic!("expected Submit, got {other:?}"),
+    }
+}
+
+#[test]
+fn edit_shortcut_validation_matches_the_add_wizard() {
+    let store = empty_store();
+    // An empty key is refused on the step that prefilled it.
+    let f = new_edit_shortcut("t", "baidu", "https://www.baidu.com");
+    let (f, _) = handle_key(&f, &store, ctrl('u'));
+    let (f, out) = enter(&f, &store);
+    assert_eq!(out, FormOutcome::Active);
+    assert_eq!(f.error.as_deref(), Some("shortcut key cannot be empty"));
+
+    // A key with whitespace is refused too.
+    let (f, out) = enter(&new_edit_shortcut("t", "two words", "v"), &store);
+    assert_eq!(out, FormOutcome::Active);
+    assert_eq!(f.error.as_deref(), Some("shortcut key must be one word"));
+
+    // The value step refuses an empty value.
+    let f = new_edit_shortcut("t", "baidu", "https://www.baidu.com");
+    let (f, _) = enter(&f, &store); // key accepted
+    let (f, _) = handle_key(&f, &store, ctrl('u'));
+    let (f, out) = enter(&f, &store);
+    assert_eq!(out, FormOutcome::Active);
+    assert_eq!(f.error.as_deref(), Some("shortcut value cannot be empty"));
+}
+
+#[test]
+fn edit_trigger_prefills_the_word_and_submits_the_rename() {
+    let store = empty_store();
+    let f = new_edit_trigger("t", "tt");
+    assert_eq!(
+        f.purpose,
+        Purpose::EditTrigger {
+            alias: "t".to_string(),
+            old: "tt".to_string()
+        }
+    );
+    assert_eq!(f.input, "tt", "the current word is prefilled");
+    assert_eq!(f.caret, 2);
+    assert_eq!(step_count(&f), 1);
+
+    // Enter accepts the prefilled word: rename to itself.
+    let (_, out) = enter(&f, &store);
+    match out {
+        FormOutcome::Submit(Submission::RenameTrigger { alias, old, new }) => {
+            assert_eq!(
+                (alias.as_str(), old.as_str(), new.as_str()),
+                ("t", "tt", "tt")
+            );
+        }
+        other => panic!("expected Submit, got {other:?}"),
+    }
+
+    // Typing over it submits the new word with the old one attached.
+    let (f, _) = handle_key(&f, &store, ctrl('u'));
+    let f = type_str(&f, "tw", &store);
+    let (_, out) = enter(&f, &store);
+    match out {
+        FormOutcome::Submit(Submission::RenameTrigger { old, new, .. }) => {
+            assert_eq!((old.as_str(), new.as_str()), ("tt", "tw"));
+        }
+        other => panic!("expected Submit, got {other:?}"),
+    }
+}
+
+#[test]
+fn edit_trigger_validation_matches_the_add_wizard() {
+    let store = empty_store();
+    let (f, out) = enter(&new_edit_trigger("t", "bad word"), &store);
+    assert_eq!(out, FormOutcome::Active);
+    assert_eq!(
+        f.error.as_deref(),
+        Some("invalid trigger: bad word (a-z 0-9 - _)")
+    );
+
+    let f = new_edit_trigger("t", "tt");
+    let (f, _) = handle_key(&f, &store, ctrl('u'));
+    let (f, out) = enter(&f, &store);
+    assert_eq!(out, FormOutcome::Active);
+    assert_eq!(f.error.as_deref(), Some("trigger cannot be empty"));
+}

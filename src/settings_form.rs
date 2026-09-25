@@ -1,6 +1,7 @@
 //! Wizard form for the `/settings` page: collects a new alias (name →
 //! triggers → linux command → macos command), a new concrete shortcut
-//! (key → value), an edit of an alias's linux/macos commands, or a new
+//! (key → value), an edit of an alias's linux/macos commands, an in-place
+//! edit of one concrete shortcut (key → value) or trigger word, or a new
 //! trigger word from a single bottom input line, validating each field on
 //! Enter before advancing. Pure data + free functions; the store is only read
 //! (duplicate-name checks) — submissions are applied by [`crate::settings`] /
@@ -30,6 +31,17 @@ pub enum Purpose {
     EditCommand {
         alias: String,
     },
+    /// Rewrite one concrete shortcut of an alias; the key may change
+    /// (`old_key` is the key as shown on the list).
+    EditShortcut {
+        alias: String,
+        old_key: String,
+    },
+    /// Rename one trigger word of an alias in place.
+    EditTrigger {
+        alias: String,
+        old: String,
+    },
 }
 
 /// A finished wizard run, ready to be applied to the store.
@@ -53,6 +65,20 @@ pub enum Submission {
         alias: String,
         linux: String,
         macos: String,
+    },
+    /// Applied by `alias::edit_shortcut`: replaces `old_key` with `key`,
+    /// both under `alias`.
+    EditShortcut {
+        alias: String,
+        old_key: String,
+        key: String,
+        value: String,
+    },
+    /// Applied by `alias::rename_trigger`: renames `old` to `new` in place.
+    RenameTrigger {
+        alias: String,
+        old: String,
+        new: String,
     },
 }
 
@@ -146,6 +172,38 @@ pub fn new_edit_command(alias: &str, linux: Option<&str>, macos: Option<&str>) -
     }
 }
 
+/// Start the edit-shortcut wizard for `alias`: step 0 is the current key,
+/// step 1 the current value, both prefilled so Enter can be pressed straight
+/// through (the key may be rewritten, which renames the entry in place).
+pub fn new_edit_shortcut(alias: &str, key: &str, value: &str) -> Form {
+    Form {
+        purpose: Purpose::EditShortcut {
+            alias: alias.to_string(),
+            old_key: key.to_string(),
+        },
+        step: 0,
+        input: key.to_string(),
+        caret: key.chars().count(),
+        shortcut_value: value.to_string(),
+        ..new_alias()
+    }
+}
+
+/// Start the edit-trigger wizard for `alias` (single step, prefilled with the
+/// current word).
+pub fn new_edit_trigger(alias: &str, trigger: &str) -> Form {
+    Form {
+        purpose: Purpose::EditTrigger {
+            alias: alias.to_string(),
+            old: trigger.to_string(),
+        },
+        step: 0,
+        input: trigger.to_string(),
+        caret: trigger.chars().count(),
+        ..new_alias()
+    }
+}
+
 /// Number of wizard steps for the form's purpose.
 pub fn step_count(f: &Form) -> usize {
     match f.purpose {
@@ -153,6 +211,8 @@ pub fn step_count(f: &Form) -> usize {
         Purpose::NewShortcut { .. } => 2,
         Purpose::NewTrigger { .. } => 1,
         Purpose::EditCommand { .. } => 2,
+        Purpose::EditShortcut { .. } => 2,
+        Purpose::EditTrigger { .. } => 1,
     }
 }
 
@@ -310,6 +370,9 @@ fn advance(f: &Form, store: &Store) -> (Form, FormOutcome) {
 fn prefill(f: &Form) -> String {
     match (&f.purpose, f.step) {
         (Purpose::EditCommand { .. }, 1) => f.macos.clone(),
+        // The shortcut edit's value step starts from the current value, so
+        // Enter alone accepts it.
+        (Purpose::EditShortcut { .. }, 1) => f.shortcut_value.clone(),
         _ => String::new(),
     }
 }
@@ -322,9 +385,7 @@ fn validate_step(f: &Form, store: &Store) -> Result<(), String> {
                 Err("name cannot be empty".to_string())
             } else if !alias::valid_ident(value) {
                 Err(format!("invalid name: {value} (a-z 0-9 - _)"))
-            } else if alias::resolve(&crate::storage::merge_aliases(&store.aliases), value)
-                .is_some()
-            {
+            } else if alias::resolve(&store.aliases, value).is_some() {
                 Err(format!("name already in use: {value}"))
             } else {
                 Ok(())
@@ -351,9 +412,9 @@ fn validate_step(f: &Form, store: &Store) -> Result<(), String> {
         }
         (Purpose::NewAlias, 3) => Ok(()), // empty = same as linux
         // One word per step: key (step 0) then value (step 1). Duplicate keys
-        // and unknown aliases are reported by `alias::set_shortcut` (surfaced
-        // on the list's status line).
-        (Purpose::NewShortcut { .. }, 0) => {
+        // and unknown aliases are reported by `alias::set_shortcut` /
+        // `alias::edit_shortcut` (surfaced on the list's status line).
+        (Purpose::NewShortcut { .. } | Purpose::EditShortcut { .. }, 0) => {
             if value.is_empty() {
                 Err("shortcut key cannot be empty".to_string())
             } else if value.contains(char::is_whitespace) {
@@ -362,7 +423,7 @@ fn validate_step(f: &Form, store: &Store) -> Result<(), String> {
                 Ok(())
             }
         }
-        (Purpose::NewShortcut { .. }, 1) => {
+        (Purpose::NewShortcut { .. } | Purpose::EditShortcut { .. }, 1) => {
             if value.is_empty() {
                 Err("shortcut value cannot be empty".to_string())
             } else {
@@ -378,8 +439,9 @@ fn validate_step(f: &Form, store: &Store) -> Result<(), String> {
         }
         (Purpose::EditCommand { .. }, 1) => Ok(()), // empty = same as linux
         // One trigger word, must be a valid identifier; collisions are
-        // reported by `alias::add_trigger` (surfaced on the status line).
-        (Purpose::NewTrigger { .. }, 0) => {
+        // reported by `alias::add_trigger` / `alias::rename_trigger`
+        // (surfaced on the status line).
+        (Purpose::NewTrigger { .. } | Purpose::EditTrigger { .. }, 0) => {
             if value.is_empty() {
                 Err("trigger cannot be empty".to_string())
             } else if !alias::valid_ident(value) {
@@ -398,11 +460,17 @@ fn store_field(f: &mut Form, value: &str) {
         (Purpose::NewAlias, 1) => f.triggers = value.to_string(),
         (Purpose::NewAlias, 2) => f.linux = value.to_string(),
         (Purpose::NewAlias, 3) => f.macos = value.to_string(),
-        (Purpose::NewShortcut { .. }, 0) => f.shortcut_key = value.to_string(),
-        (Purpose::NewShortcut { .. }, 1) => f.shortcut_value = value.to_string(),
+        (Purpose::NewShortcut { .. } | Purpose::EditShortcut { .. }, 0) => {
+            f.shortcut_key = value.to_string()
+        }
+        (Purpose::NewShortcut { .. } | Purpose::EditShortcut { .. }, 1) => {
+            f.shortcut_value = value.to_string()
+        }
         (Purpose::EditCommand { .. }, 0) => f.linux = value.to_string(),
         (Purpose::EditCommand { .. }, 1) => f.macos = value.to_string(),
-        (Purpose::NewTrigger { .. }, 0) => f.trigger = value.to_string(),
+        (Purpose::NewTrigger { .. } | Purpose::EditTrigger { .. }, 0) => {
+            f.trigger = value.to_string()
+        }
         _ => {}
     }
 }
@@ -429,7 +497,6 @@ fn build_submission(f: &Form) -> Submission {
                 linux: Some(f.linux.clone()),
                 macos: Some(macos),
                 shortcuts: BTreeMap::new(),
-                builtin: false,
             })
         }
         Purpose::NewShortcut { alias } => Submission::Shortcut {
@@ -437,9 +504,20 @@ fn build_submission(f: &Form) -> Submission {
             key: f.shortcut_key.clone(),
             value: f.shortcut_value.clone(),
         },
+        Purpose::EditShortcut { alias, old_key } => Submission::EditShortcut {
+            alias: alias.clone(),
+            old_key: old_key.clone(),
+            key: f.shortcut_key.clone(),
+            value: f.shortcut_value.clone(),
+        },
         Purpose::NewTrigger { alias } => Submission::Trigger {
             alias: alias.clone(),
             trigger: f.trigger.clone(),
+        },
+        Purpose::EditTrigger { alias, old } => Submission::RenameTrigger {
+            alias: alias.clone(),
+            old: old.clone(),
+            new: f.trigger.clone(),
         },
         // A blank macos answer is left blank on purpose: `alias::set_commands`
         // mirrors linux for it, the single-platform rule.
@@ -535,7 +613,6 @@ mod tests {
                 assert_eq!(def.linux.as_deref(), Some("printf %s {input}"));
                 assert_eq!(def.macos.as_deref(), Some("printf %s {input}"));
                 assert!(def.shortcuts.is_empty());
-                assert!(!def.builtin);
             }
             other => panic!("expected Submit, got {other:?}"),
         }
@@ -555,7 +632,7 @@ mod tests {
         let (f, out) = enter(&f, &store);
         assert_eq!(out, FormOutcome::Active);
         assert!(f.error.unwrap().contains("invalid name"));
-        // duplicate name (against builtins, case-insensitive)
+        // duplicate name (against the seeded aliases, case-insensitive)
         let f = type_str(&new_alias(), "BR", &store);
         let (f, out) = enter(&f, &store);
         assert_eq!(out, FormOutcome::Active);

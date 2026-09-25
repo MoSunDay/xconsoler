@@ -1,3 +1,8 @@
 /target
 __pycache__/
 *.pyc
+.probe/
+openbox.log
+/store.json
+/store.json.corrupt
+/store.json.tmp

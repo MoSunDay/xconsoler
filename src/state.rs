@@ -6,7 +6,7 @@
 use crate::alias::AliasDef;
 use crate::keyspec::{self, KeySpec};
 use crate::matcher::{self, Candidate};
-use crate::storage::{self, Store};
+use crate::storage::Store;
 
 /// Max history rows on the empty bar (most recent successful runs first).
 pub const RECENT_LIMIT: usize = 10;
@@ -48,8 +48,9 @@ pub enum Mode {
     Settings(Box<crate::settings::Settings>),
 }
 
-/// Whole TUI state. `store` is the persisted part; `aliases` is the derived
-/// `storage::merge_aliases` view used for resolution and rendering.
+/// Whole TUI state. `store` is the persisted part; `aliases` mirrors its
+/// stored list (the seeded defaults are ordinary entries there) and is used
+/// for resolution and rendering.
 #[derive(Debug)]
 pub struct App {
     pub store: Store,
@@ -78,11 +79,12 @@ pub struct App {
     pub palette: Option<usize>,
 }
 
-/// Build an app from a loaded store: **shown**, empty input, merged aliases.
-/// An unparsable stored wake key falls back to [`keyspec::DEFAULT`]; an
-/// unparsable command-palette key to [`keyspec::DEFAULT_COMMAND`].
+/// Build an app from a loaded store: **shown**, empty input, the stored
+/// aliases verbatim. An unparsable stored wake key falls back to
+/// [`keyspec::DEFAULT`]; an unparsable command-palette key to
+/// [`keyspec::DEFAULT_COMMAND`].
 pub fn new(store: Store, summon: bool) -> App {
-    let aliases = storage::merge_aliases(&store.aliases);
+    let aliases = store.aliases.clone();
     let wake = keyspec::parse(&store.config.wake_key).unwrap_or(keyspec::DEFAULT);
     let command = keyspec::parse(&store.config.command_key).unwrap_or(keyspec::DEFAULT_COMMAND);
     App {
@@ -150,12 +152,15 @@ mod tests {
 
     fn app_with_shortcut() -> App {
         let mut store = Store::default();
-        let mut def = crate::alias::defaults().remove(0); // br builtin
-        def.shortcuts.clear(); // fixture: exactly the shortcuts below
-        def.builtin = false;
-        def.shortcuts
+        // The seeded `br` carries exactly the shortcuts below in this fixture.
+        let br = store
+            .aliases
+            .iter_mut()
+            .find(|d| d.name == "br")
+            .expect("br is seeded");
+        br.shortcuts.clear();
+        br.shortcuts
             .insert("baidu".to_string(), "https://www.baidu.com".to_string());
-        store.aliases.push(def);
         new(store, false)
     }
 
@@ -226,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn new_starts_shown_with_merged_aliases() {
+    fn new_starts_shown_with_the_stored_aliases() {
         let app = new(Store::default(), false);
         assert_eq!(app.visibility, Visibility::Shown);
         assert!(app.input.is_empty());
@@ -240,7 +245,7 @@ mod tests {
             keyspec::parse(keyspec::DEFAULT_COMMAND_SPEC).unwrap()
         );
         assert_eq!(app.palette, None);
-        assert_eq!(app.aliases, storage::merge_aliases(&[]));
+        assert_eq!(app.aliases, crate::alias::defaults());
     }
 
     #[test]

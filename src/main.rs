@@ -6,6 +6,7 @@ use std::io::stdout;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyEvent};
@@ -17,6 +18,7 @@ use xconsoler::action;
 use xconsoler::app;
 use xconsoler::escguard::{self, EscGuard};
 use xconsoler::fit;
+use xconsoler::fit_tmux;
 use xconsoler::keyspec::{self, KeySpec};
 use xconsoler::platform;
 use xconsoler::render;
@@ -45,7 +47,7 @@ OPTIONS:
     --print-rows          print the desktop bar height in rows for the store,
                           exit (used by scripts/xc-bar)
     --shell <bash|zsh>    shell flavour for --print-bind (default: bash)
-    --store <path>        store.json location (default: <config_dir>/xconsoler/store.json)
+    --store <path>        store.json location (default: $HOME/xconsoler/store.json)
     -h, --help            show this help";
 
 /// Tick cap: worst-case latency before a redraw / quit check.
@@ -320,31 +322,53 @@ fn run(
     }
     let mut guard = EscGuard::new();
 
-    // Window auto-fit, resolved once: a summoned bar owns its window, unless
-    // `XC_ROWS` pinned the height or `XC_NO_FIT` opted out. The X11 fallback
-    // covers the terminals that ignore the in-band resize escape.
+    // Window auto-fit, resolved once: the bar follows its candidate set
+    // unless `XC_ROWS` pinned the height or `XC_NO_FIT` opted out. Inside a
+    // tmux pane the request travels through the passthrough envelope and
+    // targets the outer window; the X11 fallback covers the terminals that
+    // ignore the in-band resize escape.
     let env = |key: &str| std::env::var_os(key).and_then(|v| v.into_string().ok());
-    let fit_on = fit::enabled(
-        summon,
-        env("XC_ROWS").as_deref(),
-        env("XC_NO_FIT").as_deref(),
-    );
-    let fit_wm = fit_on
-        && fit::wm_resize_applies(
-            env("DISPLAY").as_deref(),
-            env("WAYLAND_DISPLAY").as_deref(),
-            fit::which("xdotool", env("PATH").as_deref()).is_some(),
-        );
-    let mut pending: Option<(u16, u8)> = None;
+    let fit_on = fit::enabled(env("XC_ROWS").as_deref(), env("XC_NO_FIT").as_deref());
+    let pane = if fit_on {
+        fit_tmux::session(env("TMUX").as_deref(), env("TMUX_PANE").as_deref())
+    } else {
+        None
+    };
+    let fit = Fit {
+        on: fit_on,
+        wm: fit_on
+            && pane.is_none()
+            && fit::wm_resize_applies(
+                env("DISPLAY").as_deref(),
+                env("WAYLAND_DISPLAY").as_deref(),
+                fit::which("xdotool", env("PATH").as_deref()).is_some(),
+            ),
+        pane,
+    };
+    // tmux 3.3+ forwards pane passthrough only while the window option
+    // `allow-passthrough` is on: switch it on for this window, remembering
+    // what to put back at exit.
+    let passthrough = fit.pane.as_deref().and_then(fit_tmux::allow_passthrough);
+    // Height the window had at startup (and the last one the user picked):
+    // the size the fit restores on the way out.
+    let mut baseline = crossterm::terminal::size()?.1;
+    let mut pending: Option<Asked> = None;
 
     loop {
-        fit_window(fit_on, fit_wm, &mut pending, &app)?;
+        fit_window(&fit, &mut pending, &app, Instant::now())?;
         terminal.draw(|f| render::draw(f, &app))?;
         if event::poll(POLL_TIMEOUT)? {
             match event::read()? {
                 // A resize from outside - the user dragging the window, or the
-                // terminal applying our own request - wins over the fit.
-                Event::Resize(_, _) => fit_adopt(&mut pending),
+                // terminal applying our own request - wins over the fit. A size
+                // the user picked becomes the one restored at exit; our own
+                // request is the one that reports the height we asked for.
+                Event::Resize(_, rows) => {
+                    if rows != fit::desired_rows(&app) {
+                        baseline = rows;
+                    }
+                    fit_adopt(&mut pending);
+                }
                 Event::Key(key) => {
                     let mut events = guard.feed(key);
                     events.extend(resolve_held(&mut guard)?);
@@ -368,49 +392,144 @@ fn run(
             break;
         }
     }
+    fit_restore(&fit, baseline);
+    if let Some(pane) = fit.pane.as_deref() {
+        fit_tmux::restore_passthrough(pane, passthrough.as_deref());
+    }
     storage::save(path, &app.store)?;
     Ok(())
 }
 
-/// Grow/shrink the terminal to the rows the bar needs. `pending` is
-/// `(height last asked for, tries spent)`: the request is repeated on the
-/// following ticks until the window reports that height - terminals apply it
-/// asynchronously and a WM may not have activated the window on the very
-/// first frame - and at most [`fit::MAX_TRIES`] times, so a terminal that
-/// ignores both mechanisms is not spammed once per tick. Both requests keep
-/// the current width: only the height is the bar's business. Best effort, a
-/// failing `xdotool` must never take the bar down, and the X11 fallback only
-/// fires for a focused window that provably belongs to this process tree.
-fn fit_window(on: bool, wm: bool, pending: &mut Option<(u16, u8)>, app: &App) -> Result<()> {
-    if !on {
+/// How the window fit reaches its terminal, resolved once before the loop.
+struct Fit {
+    /// Fit enabled: not pinned via `XC_ROWS`, not opted out via `XC_NO_FIT`.
+    on: bool,
+    /// X11 fallback available: `xdotool` on `PATH`, an X display, no Wayland.
+    /// Never inside tmux, where the hosting window cannot be proven to be ours
+    /// and the passthrough envelope is the channel that gets out anyway.
+    wm: bool,
+    /// `Some(pane)` when the bar runs inside a tmux pane: the resize escape
+    /// needs the DCS passthrough envelope and the outer window needs tmux's
+    /// own chrome (the status line) added to the pane height.
+    pane: Option<String>,
+}
+
+/// One height the fit is working on: what it wants, how many asks that
+/// took, and when the last one went out - the input of [`fit::may_ask`].
+/// `tries == fit::MAX_ASKS` parks the entry, whether because the window
+/// arrived at the wanted height, because a resize from outside won, or
+/// because the ask budget is spent.
+#[derive(Clone, Copy, Debug)]
+struct Asked {
+    want: u16,
+    tries: u8,
+    at: Instant,
+}
+
+/// Grow/shrink the terminal to the rows the bar needs. `pending` is the
+/// height the fit last asked for; it is repeated until the window reports that
+/// height, because terminals apply the request asynchronously and a WM may not
+/// have activated the window on the very first frames. [`fit::may_ask`] paces
+/// the retries and caps them, so a terminal that ignores the mechanisms is not
+/// asked once per tick forever. The request keeps the current width: only the
+/// height is the bar's business. Best effort, a failing `xdotool` must never
+/// take the bar down, and the X11 fallback only fires for a focused window
+/// that provably belongs to this process tree.
+fn fit_window(fit: &Fit, pending: &mut Option<Asked>, app: &App, now: Instant) -> Result<()> {
+    if !fit.on {
         return Ok(());
     }
     let want = fit::desired_rows(app);
-    let tries = match *pending {
-        Some((asked, n)) if asked == want => n,
-        _ => 0,
+    let mut asked = match *pending {
+        Some(asked) if asked.want == want => asked,
+        // A new wanted height: ask right away, whatever the last one cost.
+        _ => Asked {
+            want,
+            tries: 0,
+            at: now,
+        },
     };
-    *pending = Some((want, tries));
-    if tries >= fit::MAX_TRIES {
+    if !fit::may_ask(asked.tries, now.duration_since(asked.at)) {
+        *pending = Some(asked);
         return Ok(());
     }
     let (cols, rows) = crossterm::terminal::size()?;
-    if rows == want {
-        // Already there (or the terminal just honoured the request): stop.
-        *pending = Some((want, fit::MAX_TRIES));
+    if cols == 0 {
+        // The pty has no width yet (the far end has not reported its window
+        // size). Resizing to zero columns is never what the bar wants, so ask
+        // again on a later tick instead.
         return Ok(());
     }
+    if rows == want {
+        // Already there (or the terminal just honoured the request): stop.
+        asked.tries = fit::MAX_ASKS;
+        *pending = Some(asked);
+        return Ok(());
+    }
+    let escape = match &fit.pane {
+        // tmux swallows the escape in-band: hand it to the outer terminal
+        // through the passthrough envelope, asking for the pane height plus
+        // tmux's own chrome.
+        Some(pane) => match fit_tmux::outer_request(pane, want) {
+            Some(outer) => fit_tmux::passthrough(&fit::resize_escape(outer, cols)),
+            // A split pane shares the window with its siblings: not ours to
+            // resize, and not worth asking again until the wanted height
+            // changes (the ask budget parks it).
+            None => {
+                asked.tries = fit::MAX_ASKS;
+                *pending = Some(asked);
+                return Ok(());
+            }
+        },
+        None => fit::resize_escape(want, cols),
+    };
     let mut out = stdout();
-    out.write_all(fit::resize_escape(want, cols).as_bytes())?;
+    out.write_all(escape.as_bytes())?;
     out.flush()?;
-    if wm && focused_window_is_ours() {
+    if fit.wm && focused_window_is_ours() {
         let argv = fit::wm_resize_argv(want, cols);
         let _ = std::process::Command::new(&argv[0])
             .args(&argv[1..])
             .status();
     }
-    *pending = Some((want, tries + 1));
+    asked.tries += 1;
+    asked.at = now;
+    *pending = Some(asked);
     Ok(())
+}
+
+/// Undo the fit on the way out: leave the window at the height it started
+/// with, or at the one the user last picked if they resized it mid-run. Only
+/// the height was ever the fit's business, so a window that never changed is
+/// left alone, and a terminal that fails us at exit is not an error worth
+/// reporting - the bar is quitting either way.
+fn fit_restore(fit: &Fit, baseline: u16) {
+    if !fit.on {
+        return;
+    }
+    let Ok((cols, rows)) = crossterm::terminal::size() else {
+        return;
+    };
+    // No width known (or never resized): leave the window exactly as it is.
+    if cols == 0 || rows == baseline {
+        return;
+    }
+    let escape = match &fit.pane {
+        Some(pane) => match fit_tmux::outer_request(pane, baseline) {
+            Some(outer) => fit_tmux::passthrough(&fit::resize_escape(outer, cols)),
+            None => return,
+        },
+        None => fit::resize_escape(baseline, cols),
+    };
+    let mut out = stdout();
+    let _ = out.write_all(escape.as_bytes());
+    let _ = out.flush();
+    if fit.wm && focused_window_is_ours() {
+        let argv = fit::wm_resize_argv(baseline, cols);
+        let _ = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .status();
+    }
 }
 
 /// Pid of the X11 window that currently has input focus, via the chained
@@ -449,9 +568,9 @@ fn focused_window_is_ours() -> bool {
 /// terminal applying our own request) wins: park the counter so the bar stops
 /// asking for the old height, and refit as soon as the candidate set wants a
 /// different one.
-fn fit_adopt(pending: &mut Option<(u16, u8)>) {
-    if let Some(p) = pending {
-        p.1 = fit::MAX_TRIES;
+fn fit_adopt(pending: &mut Option<Asked>) {
+    if let Some(asked) = pending.as_mut() {
+        asked.tries = fit::MAX_ASKS;
     }
 }
 

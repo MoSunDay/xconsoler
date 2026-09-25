@@ -63,6 +63,23 @@ pub fn apply_effect(store: &mut Store, effect: &Effect) -> Option<Result<String,
                 Err(e) => Err(e),
             },
         ),
+        Effect::EditShortcut {
+            alias,
+            old_key,
+            key,
+            value,
+        } => Some(
+            match alias::edit_shortcut(&mut store.aliases, alias, old_key, key, value) {
+                Ok(()) => Ok(format!("shortcut updated: {alias} {key} = {value}")),
+                Err(e) => Err(e),
+            },
+        ),
+        Effect::RenameTrigger { alias, old, new } => Some(
+            match alias::rename_trigger(&mut store.aliases, alias, old, new) {
+                Ok(()) => Ok(format!("trigger renamed: {alias} {old} → {new}")),
+                Err(e) => Err(e),
+            },
+        ),
         Effect::None | Effect::Back | Effect::Save | Effect::Quit => None,
     }
 }
@@ -96,7 +113,7 @@ pub fn apply(app: &mut App, key: KeyEvent, path: &Path) {
         Effect::None => app.mode = Mode::Settings(Box::new(st)),
         Effect::Back => {}
         Effect::Save => {
-            app.aliases = storage::merge_aliases(&app.store.aliases);
+            app.aliases = app.store.aliases.clone();
             // A failed save must not be reported as a successful edit.
             if let Err(e) = storage::save(path, &app.store) {
                 st.status = Some((false, format!("save failed: {e}")));
@@ -109,7 +126,9 @@ pub fn apply(app: &mut App, key: KeyEvent, path: &Path) {
         | Effect::SetShortcut { .. }
         | Effect::AddTrigger { .. }
         | Effect::RemoveTrigger { .. }
-        | Effect::SetCommands { .. } => app.mode = Mode::Settings(Box::new(st)),
+        | Effect::SetCommands { .. }
+        | Effect::EditShortcut { .. }
+        | Effect::RenameTrigger { .. } => app.mode = Mode::Settings(Box::new(st)),
     }
 }
 
@@ -129,7 +148,7 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
-    /// App on the settings page, cursor on the first merged alias (`br`).
+    /// App on the settings page, cursor on the first stored alias (`br`).
     fn setup() -> (App, TempDir, std::path::PathBuf) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("store.json");
@@ -201,9 +220,8 @@ mod tests {
         type_str(&mut app, "git clone {input}", &path);
         apply(&mut app, key(KeyCode::Enter), &path);
 
-        let def = app.store.aliases.first().expect("br materialised");
+        let def = app.store.aliases.first().expect("br is seeded");
         assert_eq!(def.name, "br");
-        assert!(!def.builtin, "a builtin override, like :arg does");
         assert_eq!(
             def.shortcuts.get("gc").map(String::as_str),
             Some("git clone {input}")
@@ -231,8 +249,9 @@ mod tests {
         let (ok, msg) = status(&app).expect("the failure is reported");
         assert!(!ok);
         assert!(msg.contains("already used by cd"), "got: {msg}");
-        assert!(
-            app.store.aliases.is_empty(),
+        assert_eq!(
+            app.store.aliases,
+            alias::defaults(),
             "a refused edit changes nothing"
         );
         assert!(!path.exists(), "nothing persisted");
@@ -251,7 +270,7 @@ mod tests {
         type_str(&mut app, "open {input}", &path);
         apply(&mut app, key(KeyCode::Enter), &path);
 
-        let def = app.store.aliases.first().expect("br materialised");
+        let def = app.store.aliases.first().expect("br is seeded");
         assert_eq!(def.linux.as_deref(), Some("echo {input}"));
         assert_eq!(def.macos.as_deref(), Some("open {input}"));
         assert!(status(&app).is_some_and(|(ok, m)| ok && m.contains("commands updated")));
@@ -271,7 +290,7 @@ mod tests {
         apply(&mut app, ctrl('u'), &path); // blank macos step
         apply(&mut app, key(KeyCode::Enter), &path);
 
-        let def = app.store.aliases.first().expect("br materialised");
+        let def = app.store.aliases.first().expect("br is seeded");
         assert_eq!(def.linux.as_deref(), Some("printf %s {input}"));
         assert_eq!(
             def.macos.as_deref(),
@@ -327,7 +346,17 @@ mod tests {
             },
         );
         assert!(out.unwrap().is_err(), "unknown trigger is refused");
-        assert!(store.aliases.is_empty(), "nothing was materialised");
+        assert_eq!(store.aliases, alias::defaults(), "nothing changed");
+
+        let out = apply_effect(
+            &mut store,
+            &Effect::RemoveTrigger {
+                alias: "ghost".to_string(),
+                trigger: "g".to_string(),
+            },
+        );
+        assert!(out.unwrap().is_err(), "unknown alias is refused");
+        assert_eq!(store.aliases, alias::defaults(), "still nothing changed");
     }
 
     #[test]
@@ -353,7 +382,6 @@ mod tests {
             linux: Some("printf %s {input}".to_string()),
             macos: Some("printf %s {input}".to_string()),
             shortcuts: Default::default(),
-            builtin: false,
         };
         let out = apply_effect(&mut store, &Effect::AddAlias(def)).unwrap();
         assert_eq!(out.unwrap(), "alias added: t");
@@ -413,5 +441,89 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.unwrap(), "trigger removed: br (tt)");
+    }
+
+    #[test]
+    fn editing_a_shortcut_through_the_wizard_replaces_it_in_place() {
+        let (mut app, _dir, path) = setup();
+        apply(&mut app, key(KeyCode::Enter), &path); // expand br
+        apply(&mut app, key(KeyCode::Down), &path); // shortcut row: baidu
+        apply(&mut app, key(KeyCode::Char('e')), &path);
+        assert!(form_open(&app), "`e` opens the edit-shortcut wizard");
+        apply(&mut app, ctrl('u'), &path);
+        type_str(&mut app, "tieba", &path);
+        apply(&mut app, key(KeyCode::Enter), &path); // key -> value step
+        apply(&mut app, ctrl('u'), &path);
+        type_str(&mut app, "https://tieba.baidu.com", &path);
+        apply(&mut app, key(KeyCode::Enter), &path);
+
+        let def = app.store.aliases.first().expect("br is seeded");
+        assert_eq!(def.shortcuts.get("baidu"), None, "the old key is gone");
+        assert_eq!(
+            def.shortcuts.get("tieba").map(String::as_str),
+            Some("https://tieba.baidu.com")
+        );
+        let (ok, msg) = status(&app).expect("a status line");
+        assert!(ok, "got {msg}");
+        assert_eq!(msg, "shortcut updated: br tieba = https://tieba.baidu.com");
+        assert!(!form_open(&app), "the wizard closed");
+        let reloaded = storage::load(&path);
+        assert_eq!(
+            reloaded.aliases[0]
+                .shortcuts
+                .get("tieba")
+                .map(String::as_str),
+            Some("https://tieba.baidu.com"),
+            "the edit went through the same save path"
+        );
+    }
+
+    #[test]
+    fn renaming_a_trigger_reports_success_and_refusals() {
+        let mut store = Store::default();
+        let out = apply_effect(
+            &mut store,
+            &Effect::AddTrigger {
+                alias: "br".to_string(),
+                trigger: "tt".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out.unwrap(), "trigger added: br (tt)");
+        let out = apply_effect(
+            &mut store,
+            &Effect::RenameTrigger {
+                alias: "br".to_string(),
+                old: "tt".to_string(),
+                new: "tw".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out.unwrap(), "trigger renamed: br tt → tw");
+        let br = store.aliases.iter().find(|d| d.name == "br").unwrap();
+        assert_eq!(br.triggers, vec!["tw".to_string()]);
+
+        // A missing word is refused, with the same wording the removal path
+        // uses; an unknown alias is refused by the helper.
+        let out = apply_effect(
+            &mut store,
+            &Effect::RenameTrigger {
+                alias: "br".to_string(),
+                old: "nope".to_string(),
+                new: "tu".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out.unwrap_err(), "trigger not found on br: nope");
+        let out = apply_effect(
+            &mut store,
+            &Effect::RenameTrigger {
+                alias: "ghost".to_string(),
+                old: "tw".to_string(),
+                new: "tu".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out.unwrap_err(), "alias not found: ghost");
     }
 }

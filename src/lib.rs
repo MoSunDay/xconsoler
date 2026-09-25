@@ -8,6 +8,7 @@ pub mod commands;
 pub mod escguard;
 pub mod exec;
 pub mod fit;
+pub mod fit_tmux;
 pub mod fuzzy;
 pub mod history;
 pub mod keyspec;

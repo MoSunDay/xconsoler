@@ -1,4 +1,4 @@
-//! Native clipboard backend for the built-in `cd` alias.
+//! Native clipboard backend for the seeded `cd` alias.
 //!
 //! Alias templates equal to [`TEMPLATE`] are dispatched here by
 //! [`crate::exec::run_alias`] instead of `sh -c`, so the feature needs no
@@ -79,7 +79,7 @@ fn describe(err: String) -> String {
     if headless {
         format!(
             "{msg} (no display found; X11/XWayland required, \
-             or override with `:add cd <cmd>`)"
+             or replace it with `:add cd <cmd>`)"
         )
     } else {
         msg
