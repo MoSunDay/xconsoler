@@ -100,34 +100,22 @@ pub fn resolve_shortcuts(def: &AliasDef, rest: &str) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
-    let Some(head) = shortcut_key(def, trimmed) else {
-        return trimmed.to_string();
-    };
-    let tail = trimmed[head.len()..].trim();
-    let mut out = def.shortcuts.get(head).map_or("", |v| v.trim()).to_string();
-    if !tail.is_empty() {
-        if !out.is_empty() {
-            out.push(' ');
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let head = parts.next().unwrap_or("");
+    let tail = parts.next().unwrap_or("").trim();
+    match def.shortcuts.get(head) {
+        Some(value) if !value.trim().is_empty() => {
+            let mut out = value.trim().to_string();
+            if !tail.is_empty() {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(tail);
+            }
+            out
         }
-        out.push_str(tail);
+        _ => trimmed.to_string(),
     }
-    out
-}
-
-/// The registered shortcut key `rest` names, if any: the same head lookup
-/// [`resolve_shortcuts`] performs - first whitespace-delimited token, mapped
-/// value present and non-blank - so a caller shows a key exactly when running
-/// `rest` would expand it. Display callers use this to name a run without
-/// printing what it expands to.
-pub fn shortcut_key<'a>(def: &'a AliasDef, rest: &str) -> Option<&'a str> {
-    let head = rest.trim().split(char::is_whitespace).next().unwrap_or("");
-    if head.is_empty() {
-        return None;
-    }
-    def.shortcuts
-        .get_key_value(head)
-        .filter(|(_, value)| !value.trim().is_empty())
-        .map(|(key, _)| key.as_str())
 }
 
 /// The template `def` runs on `platform`: the platform's own non-blank
