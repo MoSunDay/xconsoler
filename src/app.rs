@@ -4,7 +4,9 @@ use crossterm::event::KeyEvent;
 use std::path::Path;
 
 use crate::action::Action;
-use crate::alias::{self, AliasOp};
+use crate::alias;
+use crate::bookmarks;
+use crate::colon::{self, AliasOp};
 use crate::commands;
 use crate::platform::Platform;
 use crate::settings;
@@ -70,7 +72,7 @@ fn save_store(app: &mut App, path: &Path, ok: String) {
 /// Submit a `:` command (`:add` / `:del` / `:help`).
 pub fn submit_colon(app: &mut App, path: &Path) {
     let line = app.input.trim().trim_start_matches(':').trim().to_string();
-    match alias::parse_colon_cmd(&line) {
+    match colon::parse(&line) {
         Err(e) => app.status = Some((false, e)),
         Ok(None) => {
             // help / empty / unknown: show usage, keep the input.
@@ -142,6 +144,31 @@ pub fn submit_colon(app: &mut App, path: &Path) {
                         save_store(app, path, format!("shortcut removed: {cname} {key}"));
                     }
                     Err(e) => app.status = Some((false, e)),
+                },
+            }
+        }
+        Ok(Some(AliasOp::ImportChrome { target })) => {
+            let target = target.unwrap_or_else(|| "br".to_string());
+            match alias::resolve(&app.aliases, &target).map(|d| d.name.clone()) {
+                None => app.status = Some((false, format!("alias not found: {target}"))),
+                Some(cname) => match bookmarks::find_file() {
+                    None => {
+                        app.status = Some((false, "no chrome bookmarks found".to_string()));
+                    }
+                    Some(file) => {
+                        match bookmarks::plan_and_merge(&mut app.store.aliases, &cname, &file) {
+                            Ok(added) => {
+                                rebuild_aliases(app);
+                                set_input(app, String::new());
+                                save_store(
+                                    app,
+                                    path,
+                                    format!("imported {added} chrome bookmarks into {cname}"),
+                                );
+                            }
+                            Err(e) => app.status = Some((false, e)),
+                        }
+                    }
                 },
             }
         }
@@ -230,7 +257,7 @@ fn rebuild_aliases(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alias::AliasOp;
+    use crate::colon::AliasOp;
     use crate::history;
     use crate::storage::Store;
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -428,7 +455,7 @@ mod tests {
         let (ok, msg) = app.status.clone().expect(":help sets the usage status");
         assert!(ok && msg.contains(":add"));
 
-        app.palette = Some(5); // /settings
+        app.palette = Some(6); // /settings
         apply(&mut app, Action::PaletteAccept, Platform::Linux, &path);
         assert_eq!(app.palette, None);
         assert!(matches!(app.mode, Mode::Settings(_)));
@@ -613,8 +640,91 @@ mod tests {
     fn parse_still_recognizes_ops() {
         // guard: domain API used by submit_colon behaves as expected
         assert!(matches!(
-            alias::parse_colon_cmd("del x").unwrap().unwrap(),
+            colon::parse("del x").unwrap().unwrap(),
             AliasOp::Remove(_)
         ));
+    }
+
+    /// Minimal Chrome export: two URLs in one folder.
+    const CHROME_FIXTURE: &str = r#"{"roots": {"bar": {"type": "folder", "children": [
+        {"type": "url", "name": "Rust", "url": "https://www.rust-lang.org/"},
+        {"type": "url", "name": "Docs", "url": "https://doc.rust-lang.org/"}]}}}"#;
+
+    #[test]
+    fn colon_import_chrome_is_persistent_and_re_runnable() {
+        let (mut app, dir, path) = setup();
+        shown(&mut app);
+        let fixture = dir.path().join("Bookmarks");
+        std::fs::write(&fixture, CHROME_FIXTURE).unwrap();
+
+        let _guard = crate::bookmarks::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("XC_CHROME_BOOKMARKS");
+        std::env::set_var("XC_CHROME_BOOKMARKS", &fixture);
+
+        type_str(&mut app, ":import-chrome", &path);
+        apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
+        let (ok, msg) = app
+            .status
+            .clone()
+            .expect("import reports on the status line");
+        assert!(ok, "{msg}");
+        assert_eq!(msg, "imported 2 chrome bookmarks into br");
+        let br = app.aliases.iter().find(|d| d.name == "br").unwrap();
+        assert!(!br.builtin, "the builtin was overridden in place");
+        assert_eq!(
+            br.shortcuts.get("rust").map(String::as_str),
+            Some("https://www.rust-lang.org/")
+        );
+        assert_eq!(
+            br.shortcuts.get("docs").map(String::as_str),
+            Some("https://doc.rust-lang.org/")
+        );
+        // Pre-existing builtin keys survive the import.
+        assert_eq!(
+            br.shortcuts.get("baidu").map(String::as_str),
+            Some("https://www.baidu.com")
+        );
+        assert_eq!(
+            br.shortcuts.get("gm").map(String::as_str),
+            Some("https://mail.google.com")
+        );
+
+        // The change reached the store: a fresh load carries the override.
+        let reloaded = storage::load(&path);
+        let br = reloaded.aliases.iter().find(|d| d.name == "br").unwrap();
+        assert!(!br.builtin);
+        assert_eq!(br.shortcuts.len(), 4);
+
+        // Second run imports nothing new (no key is ever overwritten).
+        app.input = ":import-chrome".to_string();
+        apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
+        assert_eq!(
+            app.status,
+            Some((true, "imported 0 chrome bookmarks into br".to_string()))
+        );
+        assert_eq!(app.store.aliases.len(), 1, "still one user alias");
+
+        // Unknown alias: clear error, nothing imported.
+        app.input = ":import-chrome ghost".to_string();
+        apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
+        assert_eq!(
+            app.status,
+            Some((false, "alias not found: ghost".to_string()))
+        );
+
+        // A broken override path is reported, not ignored.
+        std::env::set_var("XC_CHROME_BOOKMARKS", dir.path().join("missing"));
+        app.input = ":import-chrome".to_string();
+        apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
+        let (ok, msg) = app.status.clone().unwrap();
+        assert!(!ok);
+        assert!(msg.starts_with("cannot read bookmarks"), "{msg}");
+
+        match prev {
+            Some(v) => std::env::set_var("XC_CHROME_BOOKMARKS", v),
+            None => std::env::remove_var("XC_CHROME_BOOKMARKS"),
+        }
     }
 }

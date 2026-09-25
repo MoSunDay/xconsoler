@@ -2,7 +2,8 @@
 # xconsoler long-bar toggle for the desktop (XFCE/X11):
 # running -> dismiss; not running -> summon a frameless, titleless bar
 # terminal, a quarter of the screen wide and centred on the mouse cursor's
-# height (0.7-alpha background).
+# height (0.7-alpha background). Its height follows the store's history (see
+# XC_ROWS below); XC_COLS/XC_ALPHA/XC_TRANS/XC_Y/XC_CELL_W tune the rest.
 #
 # Transparency: the host terminal does the blending (the TUI paints no
 # background of its own). "0.7 alpha" means 70% opaque, i.e. VTE
@@ -25,6 +26,37 @@
 # Window/taskbar icon: run scripts/xc-icon once -- it installs the hicolor set
 # as "XConsoler", the WM_CLASS this script hands the terminal below.
 set -u
+# --- height -------------------------------------------------------------
+# 4 rows (the 3-row input box + the status/hints row) with an empty store,
+# 2 more for the candidate list's own border/title plus one row per recent
+# entry once there is history, topping out at 16 for the 10 entries the list
+# shows by default (state::RECENT_LIMIT). The TUI shrinks the list into any
+# bar, so a store that cannot be read -- corrupt ones count as no history,
+# the launcher starts empty from them -- or a missing python3 keeps at most
+# the old 16-row default. XC_ROWS pins a fixed height; XC_PRINT_ROWS prints
+# the computed one and exits (used by tests).
+STORE_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/xconsoler/store.json
+HIST_ROWS=16
+if command -v python3 >/dev/null 2>&1; then
+    HIST_ROWS=$(python3 - "$STORE_FILE" 2>/dev/null <<'PY' || echo 16
+import json, sys
+try:
+    history = json.load(open(sys.argv[1])).get("history") or []
+except Exception:
+    history = []
+print(4 if not history else 6 + min(len(history), 10))
+PY
+)
+fi
+case "${XC_ROWS:-}" in
+    '' | *[!0-9]* | 0) ROWS=$HIST_ROWS ;;
+    *) ROWS=$XC_ROWS ;;
+esac
+[ -n "${XC_PRINT_ROWS:-}" ] && {
+    printf '%s\n' "$ROWS"
+    exit 0
+}
+
 UID_N=$(id -u)
 if pgrep -u "$UID_N" -f 'xconsoler --summon' >/dev/null 2>&1; then
     pkill -u "$UID_N" -f 'xconsoler --summon'
@@ -75,15 +107,6 @@ fi
 [ -n "${XC_Y:-}" ] && MOUSE_Y=$XC_Y
 MOUSE_Y=$(printf '%s' "${MOUSE_Y:-}" | awk '/^-?[0-9]+$/ {print; exit}')
 [ -n "$MOUSE_Y" ] || MOUSE_Y=48
-# 16 rows: the 3-row input box, the candidate list's own border/title (2),
-# the 10 recent-history rows it shows by default, and the status row. Fewer
-# rows clamp the list (8 rows at XC_ROWS=14); /settings still draws its table
-# in place -- below ~8 rows that page has no room left. XC_ROWS overrides it
-# (say XC_ROWS=4 for a slim strip; the rows under the box then stay empty).
-case "${XC_ROWS:-}" in
-    '' | *[!0-9]* | 0) ROWS=16 ;;
-    *) ROWS=$XC_ROWS ;;
-esac
 # --geometry takes cells, so pixels are divided by the monospace advance
 # (9.3px is what the old 140-col / ~1300px layout assumed; XC_CELL_W tunes
 # it). The detached poll then re-applies the exact pixel box, so this is

@@ -1,7 +1,9 @@
 pub mod action;
 pub mod alias;
 pub mod app;
+pub mod bookmarks;
 pub mod clipboard;
+pub mod colon;
 pub mod commands;
 pub mod escguard;
 pub mod exec;
