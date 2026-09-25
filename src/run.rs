@@ -17,7 +17,7 @@ use crate::storage;
 pub fn execute(app: &mut App, platform: Platform, path: &Path) {
     let trimmed = app.input.trim().to_string();
     if trimmed.starts_with('/') {
-        return crate::app::submit_slash(app, &trimmed);
+        return crate::app::submit_slash(app, &trimmed, platform);
     }
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let head = parts.next().unwrap_or("");

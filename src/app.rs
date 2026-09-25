@@ -38,7 +38,7 @@ pub fn apply(app: &mut App, action: Action, platform: Platform, path: &Path) {
             app.status = None;
         }
         Action::ClosePalette => app.palette = None,
-        Action::PaletteAccept => palette_accept(app, path),
+        Action::PaletteAccept => palette_accept(app, platform, path),
         Action::Execute => crate::run::execute(app, platform, path),
         Action::SubmitColon => submit_colon(app, path),
         Action::InsertChar(c) => edit(app, crate::textedit::insert(&app.input, app.caret, c)),
@@ -106,8 +106,9 @@ pub fn submit_colon(app: &mut App, path: &Path) {
         }
         Ok(Some(AliasOp::Add(mut def))) => {
             // `:add t <cmd>` (no `//`) configures one command for both
-            // platforms, like the settings wizard's "empty macos = linux"
-            // rule; a `//`-separated pair keeps its own macos command.
+            // platforms, the colon command's long-standing behavior; a
+            // `//`-separated pair keeps its own macos command. (`/settings`
+            // never mirrors: its wizard stores one platform only.)
             if def.macos.is_none() {
                 def.macos = def.linux.clone();
             }
@@ -196,8 +197,9 @@ pub fn submit_colon(app: &mut App, path: &Path) {
 
 /// Submit a `/` command: an exact catalog token wins, otherwise the best
 /// fuzzy match runs (so Enter still works after Esc closed the list).
-/// `/settings` opens the settings page; unknown commands keep today's status.
-pub(crate) fn submit_slash(app: &mut App, line: &str) {
+/// `/settings` opens the settings page for `platform`; unknown commands keep
+/// today's status.
+pub(crate) fn submit_slash(app: &mut App, line: &str, platform: Platform) {
     let line = line.trim();
     let token = commands::ALL
         .iter()
@@ -206,7 +208,7 @@ pub(crate) fn submit_slash(app: &mut App, line: &str) {
         .map(|c| c.token);
     if token == Some("/settings") {
         set_input(app, String::new());
-        app.mode = Mode::Settings(Box::new(settings::new()));
+        app.mode = Mode::Settings(Box::new(settings::new_for(platform)));
     } else {
         app.status = Some((
             false,
@@ -267,7 +269,7 @@ fn move_selection(app: &mut App, delta: i32) {
 /// Enter on an open palette: rows come from the current `:`/`/` query, so
 /// complete commands (`:help`, `/settings`) run immediately and arg-taking
 /// ones prefill the input (`:add `). Closes either way.
-fn palette_accept(app: &mut App, path: &Path) {
+fn palette_accept(app: &mut App, platform: Platform, path: &Path) {
     let Some(spec) = app
         .palette
         .and_then(|i| commands::palette_items(&app.input).get(i).copied())
@@ -282,7 +284,7 @@ fn palette_accept(app: &mut App, path: &Path) {
         return;
     }
     if text.starts_with('/') {
-        submit_slash(app, &text);
+        submit_slash(app, &text, platform);
     } else {
         submit_colon(app, path);
     }
