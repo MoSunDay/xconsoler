@@ -101,6 +101,11 @@ pub struct Store {
     /// refuses to write, so an older build never downgrades a newer store.
     #[serde(skip)]
     pub from_newer_version: bool,
+    /// Runtime-only, never serialized: [`load`] records here what it had to
+    /// do to the file on disk (currently: move a corrupt store aside) so the
+    /// TUI can show a one-time status line. [`crate::state::new`] takes it.
+    #[serde(skip)]
+    pub load_notice: Option<String>,
 }
 
 impl Default for Store {
@@ -111,6 +116,7 @@ impl Default for Store {
             history: Vec::new(),
             version: SCHEMA_VERSION,
             from_newer_version: false,
+            load_notice: None,
         }
     }
 }
@@ -187,7 +193,7 @@ fn load_with_legacy(path: &Path, legacy: Option<&Path>) -> Store {
     };
     match serde_json::from_str::<Store>(&data) {
         Ok(store) => accept(store),
-        Err(_) => match declared_version(&data) {
+        Err(err) => match declared_version(&data) {
             // Valid JSON from a newer build whose shape this build cannot
             // parse: leave it in place instead of renaming it `.corrupt`,
             // and run on read-only defaults so the exit save cannot clobber
@@ -205,9 +211,20 @@ fn load_with_legacy(path: &Path, legacy: Option<&Path>) -> Store {
                 }
             }
             _ => {
+                eprintln!(
+                    "xconsoler: {} could not be parsed ({err}); moving it aside",
+                    path.display()
+                );
                 let aside = sibling_path(path, ".corrupt");
-                let _ = fs::rename(path, &aside);
-                let store = Store::default();
+                let moved = fs::rename(path, &aside).is_ok();
+                let store = Store {
+                    load_notice: Some(if moved {
+                        format!("corrupt store moved to {}", aside.display())
+                    } else {
+                        format!("store could not be parsed; kept at {}", path.display())
+                    }),
+                    ..Store::default()
+                };
                 let _ = save(path, &store);
                 store
             }

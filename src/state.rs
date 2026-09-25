@@ -82,11 +82,13 @@ pub struct App {
 /// Build an app from a loaded store: **shown**, empty input, the stored
 /// aliases verbatim. An unparsable stored wake key falls back to
 /// [`keyspec::DEFAULT`]; an unparsable command-palette key to
-/// [`keyspec::DEFAULT_COMMAND`].
-pub fn new(store: Store, summon: bool) -> App {
+/// [`keyspec::DEFAULT_COMMAND`]; a pending `load_notice` becomes the startup
+/// status message.
+pub fn new(mut store: Store, summon: bool) -> App {
     let aliases = store.aliases.clone();
     let wake = keyspec::parse(&store.config.wake_key).unwrap_or(keyspec::DEFAULT);
     let command = keyspec::parse(&store.config.command_key).unwrap_or(keyspec::DEFAULT_COMMAND);
+    let status = store.load_notice.take().map(|notice| (false, notice));
     App {
         store,
         aliases,
@@ -94,7 +96,7 @@ pub fn new(store: Store, summon: bool) -> App {
         caret: 0,
         cursor: 0,
         visibility: Visibility::Shown,
-        status: None,
+        status,
         quit: false,
         wake,
         command,
@@ -364,5 +366,25 @@ mod tests {
         let mut app = new(Store::default(), false);
         app.aliases.clear();
         assert_eq!(selected(&app), None);
+    }
+
+    #[test]
+    fn load_notice_becomes_a_one_time_status_message() {
+        let store = Store {
+            load_notice: Some("corrupt store moved to /tmp/store.json.corrupt".to_string()),
+            ..Store::default()
+        };
+        let app = new(store, false);
+        assert_eq!(
+            app.status,
+            Some((
+                false,
+                "corrupt store moved to /tmp/store.json.corrupt".to_string()
+            ))
+        );
+        assert!(
+            app.store.load_notice.is_none(),
+            "the notice is consumed once"
+        );
     }
 }

@@ -295,8 +295,9 @@ Every change is saved to `store.json` immediately.
   `--set-wake-key`/`--set-command-key`, or bar exit. A file from a **newer**
   build is loaded as-is and never overwritten.
 * A corrupt `store.json` is moved to `store.json.corrupt` and replaced with a
-  fresh seeded store immediately, so a damaged file never blocks
-  startup.
+  fresh seeded store immediately, so a damaged file never blocks startup; the
+  bar reports the move on its status line. If aliases seem to have vanished,
+  look for `store.json.corrupt` next to the store - nothing is deleted.
 * Config carries `wake_key` and `command_key` (both default `alt+d`) in the
   same file; stores written before a key existed load with its default.
   Change them with `xconsoler --set-wake-key <spec>` and
@@ -312,6 +313,9 @@ Every change is saved to `store.json` immediately.
   {"name":"br","triggers":["b"],"linux":"xdg-open {input}","macos":null,
    "shortcuts":{"baidu":"https://www.baidu.com"}}
   ```
+  Hand-editing is supported; keep the top-level `"version": 3`, because a file
+  without it counts as pre-v2 and gets the seeded defaults merged back in on
+  the next load.
 * Inputs are stored as **base64 of the plain text**, so quotes/unicode/newlines
   round-trip safely and nothing secret-looking is kept in cleartext.
 * History: up to **100** entries, newest first, deduplicated per
