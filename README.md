@@ -89,6 +89,7 @@ Type a line starting with `:` and press Enter:
 :del <name>
 :arg <name> <key> <value...>       # register a shortcut (key -> value)
 :unarg <name> <key>                # remove a shortcut
+:import-chrome [<alias>]           # import Chrome bookmarks (default: br)
 :help
 ```
 
@@ -158,6 +159,30 @@ rows: the candidate list only ever shows history and concrete shortcuts.
 
 Both kinds are managed on the `/settings` page (or from the colon commands
 above).
+
+### Chrome bookmarks
+
+`:import-chrome` reads Chrome/Chromium's `Bookmarks` file and registers every
+bookmark as a shortcut - `key` -> `url` - on the `br` alias, or on the alias
+you name:
+
+```
+:import-chrome             # into br
+:import-chrome docs        # ... into the docs alias instead
+```
+
+After it, `br <key>` opens the page exactly like a hand-written shortcut.
+Re-running it is safe: keys and URLs that are already there are left alone,
+only new bookmarks are appended, and an existing shortcut is never
+overwritten. Keys are slugs of the bookmark title (`Rust std docs` ->
+`rust-std-docs`; untitled or non-ASCII bookmarks fall back to the site's
+host), and a key that is already taken becomes `<folder>-<key>` or gets a
+`-2` suffix. Only `http(s)` bookmarks are imported, at most 300 per run.
+The usual profiles are scanned (`google-chrome`, `chromium`, the snap and
+flatpak trees; `Default` first) - point `XC_CHROME_BOOKMARKS` at one
+`Bookmarks` file to override that. The bar reports how many rows landed (or
+why the file could not be read). Importing into a built-in materializes it
+as an overriding user alias, the same way `:arg` does.
 
 ## Command palette
 
@@ -286,13 +311,21 @@ pinned kanagawa palette (`background-color=#1f1f28`, `foreground-color=#dcdcdc`,
 own: the bar draws the 3-row input box, the candidate list and one status
 row, so every cell it does not paint is the host terminal's translucent
 background. The window is a **quarter of the screen wide**, centred, with its
-top edge following the mouse cursor - 52x16 cells on a 1920px screen.
-It keeps **16 rows** so the default list fits: 3 for the box, 2 for the
-list's own title/borders, the 10 recent-history rows, 1 for the status.
-Fewer rows simply clamp the list (`XC_ROWS=14` shows 8), and `/settings`
-still draws its table in place from ~8 rows up - below that it runs out of
-room. `XC_ROWS=4` shrinks the summon to a slim strip, `XC_COLS=140` pins the
-old wide bar (and skips the pixel resize) when `/settings` wants the room. The requested **0.7 alpha** is pinned as
+top edge following the mouse cursor - 52 cells wide, 4..16 tall, on a 1920px
+screen.
+
+Its height follows the store's **recent history**: 4 rows for an empty store
+(the 3-row input box + the status/hints row), 2 more for the list's own
+title/borders plus one per recent entry once there is history, topping out at
+16 for the 10 entries the list shows. A store that cannot be read (corrupt
+ones count as no history) or a missing python3 means at most the old 16-row
+default. The TUI itself shrinks the list into whatever it is given: a framed
+block while the border/title and a row fit, bare rows in a slim strip, with
+the key hints the first thing to go - so `XC_ROWS=4` is a usable one-liner
+strip. `/settings` still draws its table in place from ~8 rows up; below that
+it runs out of room. `XC_ROWS` pins a fixed height, `XC_COLS=140` pins the
+old wide bar (and skips the pixel resize) when `/settings` wants the room,
+and `XC_PRINT_ROWS=1` prints the computed height and exits. The requested **0.7 alpha** is pinned as
 `background-transparency-percent=30`: the host terminal blends 70% bar with
 30% desktop showing through. Override it with `XC_ALPHA=0.7` (0..1 opacity)
 or `XC_TRANS=45` (VTE transparency percent, wins over `XC_ALPHA`).

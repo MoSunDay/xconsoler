@@ -10,7 +10,7 @@ use ratatui::Frame;
 
 use crate::alias;
 use crate::matcher::Candidate;
-use crate::render::{clip, main_block, row_rect, segments_line};
+use crate::render::{clip, main_block, panel_rows, row_rect, segments_line};
 use crate::state::{self, App};
 use crate::theme::{ACCENT, MUTED, SELECT_BG, SUBTLE, TEXT};
 
@@ -22,18 +22,14 @@ pub(crate) fn draw_candidates(f: &mut Frame, app: &App, width: u16, y: u16) -> u
     if cands.is_empty() {
         return y;
     }
-    // The block needs 2 border rows and the status/hints row 1; a terminal
-    // with no room for both degrades to no list at all.
-    let free = f.area().height.saturating_sub(y).saturating_sub(1) as usize;
-    // `state::candidates` already caps the count (recent or ranked); here the
-    // list only shrinks to the rows the layout leaves free.
-    let rows = cands.len().min(free.saturating_sub(2));
+    // `state::candidates` already caps the count (recent or ranked); the
+    // panel takes whatever the layout leaves under the box - framed while
+    // the border/title and a row fit, bare rows in a slim bar.
+    let (framed, rows) = panel_rows(f.area().height, y, cands.len(), app.status.is_some());
     if rows == 0 {
         return y;
     }
-    let layout = row_rect(width, y, (rows as u16).saturating_add(2));
-    let block = main_block(&list_title(app, &cands, rows));
-    let inner = block.inner(layout);
+    let inner_width = width.saturating_sub(if framed { 2 } else { 0 });
     let sel_style = Style::new().bg(SELECT_BG).fg(TEXT);
     // Same fallback as `state::selected`, then windowed like `draw_palette`
     // so the highlight can follow the cursor past the visible rows (Enter
@@ -57,12 +53,17 @@ pub(crate) fn draw_candidates(f: &mut Frame, app: &App, width: u16, y: u16) -> u
                 Candidate::History { idx } => history_segments(app, *idx),
                 Candidate::Shortcut { alias, key } => shortcut_row_segments(app, alias, key),
             };
-            segments_line(segs, inner.width as usize, i + start == cursor, sel_style)
+            segments_line(segs, inner_width as usize, i + start == cursor, sel_style)
         })
         .collect();
-    let rect = clip(f.area(), layout);
-    f.render_widget(Paragraph::new(lines).block(block), rect);
-    y.saturating_add(rows as u16).saturating_add(2)
+    let mut para = Paragraph::new(lines);
+    let mut used = rows as u16;
+    if framed {
+        para = para.block(main_block(&list_title(app, &cands, rows)));
+        used = used.saturating_add(2);
+    }
+    f.render_widget(para, clip(f.area(), row_rect(width, y, used)));
+    y.saturating_add(used)
 }
 
 /// List block title: `recent - n history` for the empty bar, per-kind counts
@@ -227,14 +228,12 @@ mod tests {
     /// The list shrinks to the room left between the box and the hint row.
     #[test]
     fn tiny_terminal_clamps_the_list_to_the_room_left() {
-        // 40x6: box (3 rows) + 1 list row + 1 hint row leaves no border room
-        // for a block, so the list degrades to nothing rather than panicking.
+        // 40x6: box (3 rows) + a bare 3-row list would leave no hint row, so
+        // the list is framed down to the single row the border leaves; the
+        // hint row is the first thing to go, never the picks.
         let text = draw_on(&app_with_recent_history(4), 40, 6);
-        assert_eq!(
-            history_rows(&text),
-            0,
-            "no room for a bordered list: {text}"
-        );
+        assert_eq!(history_rows(&text), 1, "one framed list row: {text}");
+        assert!(text.contains("recent · 1 history"), "title kept: {text}");
         assert!(text.contains("❯ "), "box still drawn: {text}");
         // 40x7: two rows of block fit, showing the two newest entries only.
         let text = draw_on(&app_with_recent_history(4), 40, 7);
@@ -243,6 +242,32 @@ mod tests {
         assert!(
             text.contains("recent · 1 history"),
             "title counts drawn rows"
+        );
+    }
+
+    /// The slim bar the launcher sizes from a history-less store still shows
+    /// the typed quick picks: bare rows under the box, no border/title, and
+    /// the hint row is the one that gives way.
+    #[test]
+    fn slim_bar_keeps_the_typed_candidates_visible() {
+        let mut app = app_with_recent_history(0);
+        app.input = "br".to_string();
+        app.cursor = 2;
+        let text = draw_on(&app, 40, 4);
+        assert_eq!(row_of(&text, "↳ br baidu"), Some(3), "{text}");
+        assert_eq!(
+            text.matches('╭').count(),
+            1,
+            "only the input box is framed: {text}"
+        );
+        let mut app = app_with_recent_history(0);
+        app.input = "br".to_string();
+        app.cursor = 2;
+        app.status = Some((false, "boom".to_string()));
+        let text = draw_on(&app, 40, 4);
+        assert!(
+            text.contains("boom") && !text.contains("↳"),
+            "a status message owns the only free row: {text}"
         );
     }
 }

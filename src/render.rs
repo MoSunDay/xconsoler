@@ -102,17 +102,14 @@ fn draw_shown(f: &mut Frame, app: &App) {
 /// stays visible; a terminal with no room degrades to no list.
 fn draw_palette(f: &mut Frame, app: &App, width: u16, y: u16) -> u16 {
     let total = commands::len();
-    // The block needs 2 border rows and the status row 1.
-    let free = f.area().height.saturating_sub(y).saturating_sub(1) as usize;
-    let rows = total.min(free.saturating_sub(2));
+    // Same framed/bare split as the candidate list (see `panel_rows`).
+    let (framed, rows) = panel_rows(f.area().height, y, total, app.status.is_some());
     if rows == 0 {
         return y;
     }
     let sel = app.palette.unwrap_or(0).min(total - 1);
     let start = sel.saturating_sub(rows - 1).min(total - rows);
-    let layout = row_rect(width, y, (rows as u16).saturating_add(2));
-    let block = main_block(&format!(" commands \u{b7} {total} "));
-    let inner = block.inner(layout);
+    let inner_width = width.saturating_sub(if framed { 2 } else { 0 });
     let sel_style = Style::new().bg(SELECT_BG).fg(TEXT);
     let mut lines = Vec::with_capacity(rows);
     for (i, spec) in commands::ALL.iter().enumerate().skip(start).take(rows) {
@@ -122,13 +119,19 @@ fn draw_palette(f: &mut Frame, app: &App, width: u16, y: u16) -> u16 {
         ];
         lines.push(segments_line(
             segs,
-            inner.width as usize,
+            inner_width as usize,
             i == sel,
             sel_style,
         ));
     }
-    f.render_widget(Paragraph::new(lines).block(block), clip(f.area(), layout));
-    y.saturating_add(rows as u16).saturating_add(2)
+    let mut para = Paragraph::new(lines);
+    let mut used = rows as u16;
+    if framed {
+        para = para.block(main_block(&format!(" commands \u{b7} {total} ")));
+        used = used.saturating_add(2);
+    }
+    f.render_widget(para, clip(f.area(), row_rect(width, y, used)));
+    y.saturating_add(used)
 }
 
 /// The bar block: rounded border, no title.
@@ -246,6 +249,24 @@ pub(crate) fn clip(area: Rect, rect: Rect) -> Rect {
     rect.intersection(area)
 }
 
+/// Rows a panel under the input box may claim, as `(framed, rows)`.
+///
+/// `keep_status` is true while a status message owns the row under the
+/// panel; otherwise the key-hints row sits there and the framed layout
+/// keeps it whenever it can. A bar too short for the border (`room < 3`)
+/// draws the rows bare instead - no border, no title - so the quick picks
+/// stay visible in a slim bar, giving the hint row up first.
+pub(crate) fn panel_rows(area_h: u16, y: u16, want: usize, keep_status: bool) -> (bool, usize) {
+    let below = area_h.saturating_sub(y) as usize;
+    let room = below.saturating_sub(usize::from(keep_status));
+    if room >= 3 {
+        // Border/title (2) and the hint row go first; one row is always kept.
+        (true, want.min(room.saturating_sub(3).max(1)))
+    } else {
+        (false, want.min(room))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +275,25 @@ mod tests {
     };
     use crate::state;
     use crate::storage::Store;
+
+    #[test]
+    fn panel_rows_frames_only_when_border_and_a_row_fit() {
+        // Roomy terminal: the whole panel, hint or status row below.
+        assert_eq!(panel_rows(14, 3, 5, false), (true, 5));
+        assert_eq!(panel_rows(14, 3, 5, true), (true, 5));
+        // Framed layouts keep the hint row: rows = room - border - hint.
+        assert_eq!(panel_rows(11, 3, 9, true), (true, 4));
+        // Exactly border + one row + the message row.
+        assert_eq!(panel_rows(7, 3, 9, true), (true, 1));
+        // Three rows below: border + one row, the hint row drops.
+        assert_eq!(panel_rows(6, 3, 9, false), (true, 1));
+        // Two rows left: bare rows take both, hint row included.
+        assert_eq!(panel_rows(5, 3, 9, false), (false, 2));
+        assert_eq!(panel_rows(4, 3, 9, false), (false, 1));
+        // A status message always keeps its row.
+        assert_eq!(panel_rows(4, 3, 9, true), (false, 0));
+        assert_eq!(panel_rows(3, 3, 9, false), (false, 0));
+    }
 
     #[test]
     fn shown_frame_draws_the_box_the_list_and_the_key_hints() {

@@ -13,7 +13,7 @@ pub struct CommandSpec {
 }
 
 /// Every built-in `:`/`/` command, in palette order.
-pub const ALL: [CommandSpec; 6] = [
+pub const ALL: [CommandSpec; 7] = [
     CommandSpec {
         token: ":add",
         desc: "define or override an alias",
@@ -38,6 +38,11 @@ pub const ALL: [CommandSpec; 6] = [
         token: ":help",
         desc: "show the colon-command help",
         needs_arg: false,
+    },
+    CommandSpec {
+        token: ":import-chrome",
+        desc: "import Chrome bookmarks (default: br)",
+        needs_arg: true,
     },
     CommandSpec {
         token: "/settings",
@@ -111,5 +116,17 @@ mod tests {
         assert_eq!(get(len() - 1).map(|c| c.token), Some("/settings"));
         assert!(get(len()).is_none());
         assert!(get(usize::MAX).is_none());
+    }
+
+    #[test]
+    fn import_chrome_row_sits_before_settings() {
+        let i = ALL
+            .iter()
+            .position(|c| c.token == ":import-chrome")
+            .expect(":import-chrome row");
+        assert_eq!(ALL[i].desc, "import Chrome bookmarks (default: br)");
+        assert_eq!(insert_text(&ALL[i]), ":import-chrome ");
+        assert_eq!(ALL[i + 1].token, "/settings", "inserted before /settings");
+        assert_eq!(get(i).map(|c| c.token), Some(":import-chrome"));
     }
 }
