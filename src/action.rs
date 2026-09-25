@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::keyspec;
 use crate::state::{App, Visibility};
+use crate::textedit::Motion;
 
 /// One user intent, applied by `crate::app::apply`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,7 +19,12 @@ pub enum Action {
     SubmitColon,
     InsertChar(char),
     Backspace,
-    ClearInput,
+    DeleteForward,
+    Motion(Motion),
+    KillToStart,
+    KillToEnd,
+    KillWord,
+    Transpose,
     MoveUp,
     MoveDown,
 }
@@ -73,8 +79,12 @@ pub fn on_key(app: &App, key: KeyEvent) -> Action {
 }
 
 fn hidden_key(key: KeyEvent) -> Action {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
+        KeyCode::Char('c') if ctrl => Action::Quit,
+        // Alt+Ctrl+D is a mistyped Alt+D: keep it a no-op, do not quit.
+        KeyCode::Char('d') if ctrl && !alt => Action::Quit,
         _ => Action::Nop,
     }
 }
@@ -96,7 +106,32 @@ fn shown_key(app: &App, key: KeyEvent) -> Action {
         KeyCode::Up => Action::MoveUp,
         KeyCode::Down | KeyCode::Tab => Action::MoveDown,
         KeyCode::Backspace if key.modifiers.is_empty() => Action::Backspace,
-        KeyCode::Char('u') if ctrl => Action::ClearInput,
+        KeyCode::Delete if key.modifiers.is_empty() => Action::DeleteForward,
+        // Ctrl/Alt + arrows are word motions, bare arrows char motions.
+        KeyCode::Left if ctrl || alt => Action::Motion(Motion::WordLeft),
+        KeyCode::Right if ctrl || alt => Action::Motion(Motion::WordRight),
+        KeyCode::Left => Action::Motion(Motion::Left),
+        KeyCode::Right => Action::Motion(Motion::Right),
+        KeyCode::Home => Action::Motion(Motion::Home),
+        KeyCode::End => Action::Motion(Motion::End),
+        // Readline's Emacs bindings: Ctrl+A/E/B/F and Alt+B/F (the latter
+        // arrive through `EscGuard` as synthetic ALT+char events).
+        KeyCode::Char('a') if ctrl => Action::Motion(Motion::Home),
+        KeyCode::Char('e') if ctrl => Action::Motion(Motion::End),
+        KeyCode::Char('b') if ctrl => Action::Motion(Motion::Left),
+        KeyCode::Char('f') if ctrl => Action::Motion(Motion::Right),
+        KeyCode::Char('b') if alt => Action::Motion(Motion::WordLeft),
+        KeyCode::Char('f') if alt => Action::Motion(Motion::WordRight),
+        // Ctrl+D is the terminal EOF convention: it quits in any state,
+        // with or without text. Deletion under the caret is the Delete key.
+        KeyCode::Char('d') if ctrl && !alt => Action::Quit,
+        KeyCode::Char('h') if ctrl => Action::Backspace,
+        KeyCode::Char('k') if ctrl => Action::KillToEnd,
+        KeyCode::Char('u') if ctrl => Action::KillToStart,
+        KeyCode::Char('w') if ctrl => Action::KillWord,
+        KeyCode::Char('t') if ctrl => Action::Transpose,
+        KeyCode::Char('n') if ctrl => Action::MoveDown,
+        KeyCode::Char('p') if ctrl => Action::MoveUp,
         KeyCode::Char('c') if ctrl => Action::Quit,
         KeyCode::Char(c) if !ctrl && !alt => Action::InsertChar(c),
         _ => Action::Nop,
@@ -273,15 +308,40 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_quits_in_both_states() {
+    fn ctrl_c_and_ctrl_d_quit_in_both_states() {
         assert_eq!(
             on_key(&hidden(), key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Action::Quit
+        );
+        assert_eq!(
+            on_key(&hidden(), key(KeyCode::Char('d'), KeyModifiers::CONTROL)),
             Action::Quit
         );
         assert_eq!(
             on_key(&shown(), key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Action::Quit
         );
+        // Ctrl+D is the EOF convention: it quits with text typed too.
+        assert_eq!(
+            on_key(&shown(), key(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+            Action::Quit
+        );
+        let mut typed = shown();
+        typed.input = "br".to_string();
+        assert_eq!(
+            on_key(&typed, key(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+            Action::Quit
+        );
+        let mut hidden_typed = hidden();
+        hidden_typed.input = "br".to_string();
+        assert_eq!(
+            on_key(
+                &hidden_typed,
+                key(KeyCode::Char('d'), KeyModifiers::CONTROL)
+            ),
+            Action::Quit
+        );
+        // Under-caret deletion stays on the Delete key (see `editing_keys`).
     }
 
     #[test]
@@ -378,8 +438,82 @@ mod tests {
             Action::Backspace
         );
         assert_eq!(
-            on_key(&app, key(KeyCode::Char('u'), KeyModifiers::CONTROL)),
-            Action::ClearInput
+            on_key(&app, key(KeyCode::Delete, KeyModifiers::NONE)),
+            Action::DeleteForward
+        );
+        assert_eq!(
+            on_key(&app, key(KeyCode::Char('h'), KeyModifiers::CONTROL)),
+            Action::Backspace
+        );
+    }
+
+    #[test]
+    fn motion_keys_map_to_readline_motions() {
+        let app = shown();
+        assert_eq!(
+            on_key(&app, key(KeyCode::Left, KeyModifiers::NONE)),
+            Action::Motion(Motion::Left)
+        );
+        assert_eq!(
+            on_key(&app, key(KeyCode::Right, KeyModifiers::NONE)),
+            Action::Motion(Motion::Right)
+        );
+        // Ctrl/Alt + arrows move by word.
+        for m in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            assert_eq!(
+                on_key(&app, key(KeyCode::Left, m)),
+                Action::Motion(Motion::WordLeft)
+            );
+            assert_eq!(
+                on_key(&app, key(KeyCode::Right, m)),
+                Action::Motion(Motion::WordRight)
+            );
+        }
+        assert_eq!(
+            on_key(&app, key(KeyCode::Home, KeyModifiers::NONE)),
+            Action::Motion(Motion::Home)
+        );
+        assert_eq!(
+            on_key(&app, key(KeyCode::End, KeyModifiers::NONE)),
+            Action::Motion(Motion::End)
+        );
+    }
+
+    #[test]
+    fn readline_control_letters_map_to_editing() {
+        let app = shown();
+        let cases = [
+            ('a', Action::Motion(Motion::Home)),
+            ('e', Action::Motion(Motion::End)),
+            ('b', Action::Motion(Motion::Left)),
+            ('f', Action::Motion(Motion::Right)),
+            ('h', Action::Backspace),
+            ('k', Action::KillToEnd),
+            ('u', Action::KillToStart),
+            ('w', Action::KillWord),
+            ('t', Action::Transpose),
+            ('n', Action::MoveDown),
+            ('p', Action::MoveUp),
+        ];
+        for (c, want) in cases {
+            assert_eq!(
+                on_key(&app, key(KeyCode::Char(c), KeyModifiers::CONTROL)),
+                want,
+                "ctrl+{c}"
+            );
+        }
+    }
+
+    #[test]
+    fn alt_letters_map_to_word_motions() {
+        let app = shown();
+        assert_eq!(
+            on_key(&app, key(KeyCode::Char('b'), KeyModifiers::ALT)),
+            Action::Motion(Motion::WordLeft)
+        );
+        assert_eq!(
+            on_key(&app, key(KeyCode::Char('f'), KeyModifiers::ALT)),
+            Action::Motion(Motion::WordRight)
         );
     }
 

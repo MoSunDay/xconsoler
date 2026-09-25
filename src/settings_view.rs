@@ -14,6 +14,7 @@ use crate::alias::AliasDef;
 use crate::render::{main_block, segments_line};
 use crate::settings::{self, Row, Settings};
 use crate::settings_form::{self, Form, Purpose};
+use crate::textedit;
 use crate::theme::{ACCENT, ERR, MUTED, OK, SELECT_BG, SUBTLE, TEXT};
 
 const TITLE_BLOCK: &str = " settings ";
@@ -34,7 +35,7 @@ const HINT_SEGMENTS: [&str; 9] = [
 ];
 /// Separator between two hint segments (3 chars).
 const HINT_SEP: &str = " · ";
-const HINTS_FORM: &str = " Enter next/accept · Ctrl+U clear · Esc cancel ";
+const HINTS_FORM: &str = " Enter next/accept · Ctrl+A/E/W/U/K edit · Esc cancel ";
 
 /// Pack [`HINT_SEGMENTS`] onto lines that never exceed `width` chars.
 ///
@@ -114,6 +115,24 @@ fn form_prompt(f: &Form) -> String {
     }
 }
 
+/// Bottom input line: `" ❯ "`, the visible window around the caret (which
+/// keeps the whole line inside `width`), and one caret cell. The caret is a
+/// solid block *before* the char at the caret, so a wide char keeps both its
+/// columns and every character stays on screen.
+fn form_input_line(f: &Form, width: usize) -> Line<'static> {
+    let (before, at, after) = textedit::window(&f.input, f.caret, width.saturating_sub(3));
+    let mut spans = vec![
+        Span::styled(" ❯ ", Style::new().fg(ACCENT)),
+        Span::styled(before, Style::new().fg(TEXT)),
+        Span::styled("█", Style::new().fg(ACCENT)),
+    ];
+    if let Some(c) = at {
+        spans.push(Span::styled(c.to_string(), Style::new().fg(TEXT)));
+    }
+    spans.push(Span::styled(after, Style::new().fg(TEXT)));
+    Line::from(spans)
+}
+
 /// Draw the whole settings page (the launcher bar is not drawn at all).
 pub fn draw(f: &mut Frame, st: &Settings, aliases: &[AliasDef]) {
     let area = f.area();
@@ -183,11 +202,7 @@ pub fn draw(f: &mut Frame, st: &Settings, aliases: &[AliasDef]) {
                 ]),
                 None => Line::from(Span::styled(HINTS_FORM, Style::new().fg(MUTED))),
             });
-            lines.push(Line::from(vec![
-                Span::styled(" ❯ ", Style::new().fg(ACCENT)),
-                Span::styled(form.input.clone(), Style::new().fg(TEXT)),
-                Span::styled("█", Style::new().fg(ACCENT)),
-            ]));
+            lines.push(form_input_line(form, width));
             lines.push(Line::from(Span::styled(HINTS_FORM, Style::new().fg(MUTED))));
         }
     }
@@ -576,12 +591,92 @@ mod tests {
         let mut form = settings_form::new_alias();
         form.step = 2;
         form.input = "printf".to_string();
+        form.caret = 0; // direct fixture: a caret at the start hides no chars
         st.form = Some(form);
         let text = draw_once(&st, &aliases);
         assert!(text.contains("new alias (3/4)"));
         assert!(text.contains("{input}"));
-        assert!(text.contains("❯ printf"));
+        assert!(text.contains("❯ █printf"), "caret block precedes the text");
         assert!(text.contains("Esc cancel"));
+    }
+
+    #[test]
+    fn form_caret_in_the_middle_keeps_every_character() {
+        let (_store, aliases) = t_store();
+        let mut st = settings::new();
+        let mut form = settings_form::new_alias();
+        form.step = 2;
+        form.input = "printf %s {input}".to_string();
+        form.caret = 7; // "printf " | "%s {input}"
+        st.form = Some(form);
+        let text = draw_wide(&st, &aliases);
+        assert!(
+            text.contains("❯ printf █%s {input}"),
+            "the caret block sits before the char under it: {text}"
+        );
+    }
+
+    #[test]
+    fn form_window_keeps_a_long_prefilled_value_visible() {
+        let (_store, aliases) = t_store();
+        let mut st = settings::new();
+        let long = "x".repeat(400);
+        let mut form = settings_form::new_edit_command("t", Some(&long), None);
+        form.caret = form.input.chars().count();
+        st.form = Some(form);
+        let text = draw_wide(&st, &aliases);
+        let line = text.lines().find(|l| l.contains('❯')).expect("input line");
+        let content = line
+            .strip_prefix('│')
+            .unwrap_or(line)
+            .strip_suffix('│')
+            .unwrap_or(line)
+            .trim_end();
+        // inner width 138 = " ❯ " + 134 text cells + 1 caret cell
+        assert_eq!(content.chars().count(), 138, "got: {content}");
+        assert!(content.starts_with(" ❯ xxx"), "text before the caret shows");
+        assert!(content.ends_with('█'), "the caret cell is at the end");
+        assert_eq!(
+            content.matches('x').count(),
+            134,
+            "the whole budget before the caret is used"
+        );
+    }
+
+    #[test]
+    fn long_form_input_fits_the_narrow_bar() {
+        let (_store, aliases) = t_store();
+        let mut st = settings::new();
+        let mut form = settings_form::new_alias();
+        form.input = "y".repeat(200);
+        form.caret = 150;
+        st.form = Some(form);
+        let text = draw_at(52, 16, &st, &aliases);
+        for line in text.lines() {
+            assert!(
+                line.chars().count() <= 52,
+                "a rendered line overflows the bar: {line}"
+            );
+        }
+        let line = text.lines().find(|l| l.contains('❯')).expect("input line");
+        let content = line
+            .strip_prefix('│')
+            .unwrap_or(line)
+            .strip_suffix('│')
+            .unwrap_or(line);
+        // inner width 50 = " ❯ " + 46 text cells + 1 caret cell
+        assert_eq!(content.chars().count(), 50, "got: {content}");
+        assert!(content.starts_with(" ❯ yyy"), "got: {content}");
+        assert!(
+            content.ends_with('█'),
+            "the caret block is at the end: {content}"
+        );
+        // 50 cells - " ❯ " (3) - caret block (1): the 46 y's before it.
+        assert_eq!(
+            content.matches('y').count(),
+            46,
+            "the window shows the chars before the caret only: {content}"
+        );
     }
 
     #[test]

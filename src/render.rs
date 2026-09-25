@@ -24,19 +24,19 @@ pub(crate) const INPUT_BOX_H: u16 = 3;
 /// Hidden-mode one-liner; the wake key is injected at render time so a
 /// custom `--wake-key` / stored config shows the real binding.
 fn hidden_hint(wake: &str) -> String {
-    format!(" xconsoler hidden — {wake} wake · Ctrl+C quit ")
+    format!(" xconsoler hidden — {wake} wake · Ctrl+C/D quit ")
 }
 
 /// Key-hints row under the list, shown while there is no status message.
 /// A narrow bar drops the least essential hints whole (no mid-word clipping):
-/// `Ctrl+C quit` goes first, the wake/run/select trio always survives.
+/// `Ctrl+C/D quit` goes first, the wake/run/select trio always survives.
 fn keys_hint(wake: &str, width: usize) -> String {
     let segs = [
         format!("{wake} hide"),
         "Enter run".to_string(),
         "↑↓/Tab select".to_string(),
-        "Ctrl+U clear".to_string(),
-        "Ctrl+C quit".to_string(),
+        "Ctrl+W/U edit".to_string(),
+        "Ctrl+C/D quit".to_string(),
     ];
     let mut keep = segs.len();
     while keep > 1 && hint_width(&segs[..keep]) > width {
@@ -142,23 +142,27 @@ fn input_block() -> Block<'static> {
         .border_style(Style::new().fg(BORDER))
 }
 
-/// Full-width input box: prompt + input + a reverse-space cursor at the end.
-/// Returns the first row under the box.
+/// Full-width input box: prompt, the text before the caret, a one-cell caret
+/// block, the char the caret sits on and the trailing text. The caret is a
+/// blank cell *before* the character at the caret, so a wide char keeps both
+/// its columns and never drifts against the caret. Returns the first row
+/// under the box.
 fn draw_input_box(f: &mut Frame, app: &App, width: u16) -> u16 {
     let rect = clip(f.area(), row_rect(width, 0, INPUT_BOX_H));
     let block = input_block();
     let inner = block.inner(rect);
-    let budget = inner.width.saturating_sub(3) as usize; // "❯ " + cursor cell
-    let shown: String = app.input.chars().take(budget).collect();
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("❯ ", Style::new().fg(ACCENT)),
-            Span::styled(shown, Style::new().fg(TEXT)),
-            Span::styled(" ", Style::new().bg(CURSOR).fg(CURSOR)),
-        ]))
-        .block(block),
-        rect,
-    );
+    let budget = inner.width.saturating_sub(2) as usize; // "❯ " is painted first
+    let mut spans = vec![Span::styled("❯ ", Style::new().fg(ACCENT))];
+    if budget > 0 {
+        let (before, at, after) = crate::textedit::window(&app.input, app.caret, budget);
+        spans.push(Span::styled(before, Style::new().fg(TEXT)));
+        spans.push(Span::styled(" ", Style::new().bg(CURSOR)));
+        if let Some(c) = at {
+            spans.push(Span::styled(c.to_string(), Style::new().fg(TEXT)));
+        }
+        spans.push(Span::styled(after, Style::new().fg(TEXT)));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)).block(block), rect);
     INPUT_BOX_H
 }
 
@@ -271,7 +275,8 @@ pub(crate) fn panel_rows(area_h: u16, y: u16, want: usize, keep_status: bool) ->
 mod tests {
     use super::*;
     use crate::render_testkit::{
-        app_with_history, app_with_recent_history, bg_cells, bg_rows, draw_on, draw_once, row_of,
+        app_with_history, app_with_recent_history, bg_cells, bg_rows, cell_symbol, draw_on,
+        draw_once, row_of,
     };
     use crate::state;
     use crate::storage::Store;
@@ -322,9 +327,132 @@ mod tests {
     }
 
     #[test]
+    fn caret_cell_sits_left_of_the_char_at_the_caret() {
+        let mut app = app_with_history();
+        app.caret = 1; // input is "br": caret between the two chars
+        let painted = bg_cells(&app, 80, 14);
+        let cursor: Vec<_> = painted.iter().filter(|(_, _, c)| *c == CURSOR).collect();
+        assert_eq!(cursor.len(), 1, "one cursor cell: {painted:?}");
+        assert_eq!(cursor[0].1, 1, "cursor on the box content row: {painted:?}");
+        assert_eq!(
+            cursor[0].0, 4,
+            "border(1) + prompt(2) + 'b' -> caret cell x=4: {painted:?}"
+        );
+        assert_eq!(
+            cell_symbol(&app, 80, 14, 4, 1),
+            " ",
+            "the caret cell itself is blank: {painted:?}"
+        );
+        assert_eq!(
+            cell_symbol(&app, 80, 14, 5, 1),
+            "r",
+            "the char at the caret follows it: {painted:?}"
+        );
+        let text = draw_once(&app);
+        assert_eq!(row_of(&text, "❯ b"), Some(1), "both chars kept: {text}");
+        assert!(text.contains('r'), "the char at the caret is drawn: {text}");
+    }
+
+    #[test]
+    fn long_input_scrolls_so_the_caret_stays_visible() {
+        let mut app = app_with_history();
+        app.input = format!("{}the-end", "x".repeat(50));
+        app.caret = app.input.chars().count();
+        let text = draw_on(&app, 40, 14);
+        assert!(text.contains("the-end"), "tail visible: {text}");
+        let painted = bg_cells(&app, 40, 14);
+        let cursor: Vec<_> = painted.iter().filter(|(_, _, c)| *c == CURSOR).collect();
+        assert_eq!(cursor.len(), 1, "one cursor cell: {painted:?}");
+        assert_eq!(
+            *cursor[0],
+            (38, 1, CURSOR),
+            "caret parks on the last inner cell: {painted:?}"
+        );
+
+        // Caret at the start: the window shows the head, not the tail.
+        app.caret = 0;
+        let head = draw_on(&app, 40, 14);
+        assert!(!head.contains("the-end"), "tail scrolled away: {head}");
+        // The caret cell sits between "❯ " and the first x.
+        assert!(head.contains("❯  x"), "head visible: {head}");
+    }
+
+    #[test]
+    fn text_chars_are_preserved_when_not_scrolled() {
+        let mut app = app_with_history();
+        app.input = "café au lait".to_string();
+        app.caret = 3; // before the 'é'
+        let text = draw_once(&app);
+        assert_eq!(
+            row_of(&text, "❯ caf"),
+            Some(1),
+            "the text before the caret is drawn: {text}"
+        );
+        assert!(text.contains("au lait"), "the tail is drawn: {text}");
+        let painted = bg_cells(&app, 80, 14);
+        let cursor: Vec<_> = painted.iter().filter(|(_, _, c)| *c == CURSOR).collect();
+        assert_eq!(cursor.len(), 1, "one cursor cell: {painted:?}");
+        assert_eq!(
+            cell_symbol(&app, 80, 14, cursor[0].0, cursor[0].1),
+            " ",
+            "the caret cell is blank"
+        );
+        assert_eq!(
+            cell_symbol(&app, 80, 14, cursor[0].0 + 1, cursor[0].1),
+            "é",
+            "the accented char follows the caret"
+        );
+    }
+
+    #[test]
+    fn cjk_caret_is_one_cell_and_the_row_stays_in_bounds() {
+        let mut app = app_with_history();
+        app.input = "中文中文中文".to_string();
+        app.caret = app.input.chars().count();
+        // width 12: border(2) + prompt(2) + six text cells + one caret cell.
+        let text = draw_on(&app, 12, 14);
+        let row = text.lines().nth(1).unwrap_or("");
+        assert_eq!(row.chars().count(), 12, "row fills the width: {row:?}");
+        assert!(
+            row.starts_with('│') && row.ends_with('│'),
+            "content row keeps both borders: {row:?}"
+        );
+        let painted = bg_cells(&app, 12, 14);
+        let cursor: Vec<_> = painted
+            .iter()
+            .filter(|(_, _, c)| *c == CURSOR)
+            .copied()
+            .collect();
+        assert_eq!(
+            cursor,
+            vec![(9, 1, CURSOR)],
+            "one caret cell after three wide chars: {painted:?}"
+        );
+        // Caret in the middle: three wide chars before it are six cells.
+        app.caret = 3;
+        let painted = bg_cells(&app, 12, 14);
+        let cursor: Vec<_> = painted
+            .iter()
+            .filter(|(_, _, c)| *c == CURSOR)
+            .copied()
+            .collect();
+        assert_eq!(
+            cursor,
+            vec![(9, 1, CURSOR)],
+            "caret after 3 wide chars stays at x=9: {painted:?}"
+        );
+        assert_eq!(
+            cell_symbol(&app, 12, 14, 9, 1),
+            " ",
+            "the caret keeps one blank cell"
+        );
+    }
+
+    #[test]
     fn colon_and_settings_inputs_draw_no_candidate_list() {
         let mut app = app_with_history();
         app.input = ":".to_string();
+        app.caret = 1;
         let colon = draw_once(&app);
         assert!(!colon.contains("matches ·"), "no list: {colon}");
         assert!(!colon.contains('★'), "no list rows: {colon}");
@@ -333,6 +461,7 @@ mod tests {
         assert!(colon.contains("Enter run"), "hints still drawn: {colon}");
 
         app.input = "/settings".to_string();
+        app.caret = app.input.chars().count();
         let slash = draw_once(&app);
         assert!(!slash.contains("matches ·"), "no list: {slash}");
         assert_eq!(slash.matches('╭').count(), 1, "input box only: {slash}");
@@ -490,15 +619,15 @@ mod tests {
         assert!(narrow.contains("alt+d hide"), "{narrow}");
         assert!(narrow.contains("Enter run"), "{narrow}");
         assert!(narrow.contains("↑↓/Tab select"), "{narrow}");
-        assert!(!narrow.contains("Ctrl+C quit"), "{narrow}");
+        assert!(!narrow.contains("Ctrl+C/D quit"), "{narrow}");
         assert!(narrow.chars().count() <= 52, "overflows: {narrow}");
     }
 
     #[test]
     fn key_hints_keep_every_segment_on_a_wide_bar() {
         let wide = keys_hint("alt+d", 140);
-        assert!(wide.contains("Ctrl+U clear"), "{wide}");
-        assert!(wide.contains("Ctrl+C quit"), "{wide}");
+        assert!(wide.contains("Ctrl+W/U edit"), "{wide}");
+        assert!(wide.contains("Ctrl+C/D quit"), "{wide}");
     }
 
     #[test]

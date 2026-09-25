@@ -3,6 +3,7 @@
 //! ESC-tail guard so a split `ESC` + `d` still reads as `Alt+D`).
 
 use std::io::stdout;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ use ratatui::Terminal;
 use xconsoler::action;
 use xconsoler::app;
 use xconsoler::escguard::{self, EscGuard};
+use xconsoler::fit;
 use xconsoler::keyspec::{self, KeySpec};
 use xconsoler::platform;
 use xconsoler::render;
@@ -40,6 +42,8 @@ OPTIONS:
                           save the command-palette key to the store
                           (default: the wake key), then exit (no TUI)
     --print-bind          print the shell binding line for the wake key, exit
+    --print-rows          print the desktop bar height in rows for the store,
+                          exit (used by scripts/xc-bar)
     --shell <bash|zsh>    shell flavour for --print-bind (default: bash)
     --store <path>        store.json location (default: <config_dir>/xconsoler/store.json)
     -h, --help            show this help";
@@ -57,6 +61,7 @@ struct Cli {
     command_key: Option<String>,
     set_command_key: Option<String>,
     print_bind: bool,
+    print_rows: bool,
     shell: String,
 }
 
@@ -94,6 +99,9 @@ fn main() {
     }
     if cli.print_bind {
         run_print_bind(&cli);
+    }
+    if cli.print_rows {
+        run_print_rows(&cli.store);
     }
 
     // zle widgets (zsh) run external commands with stdin redirected from
@@ -149,6 +157,7 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
         command_key: None,
         set_command_key: None,
         print_bind: false,
+        print_rows: false,
         shell: "bash".to_string(),
     };
     let mut i = 1;
@@ -165,6 +174,7 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
                 cli.set_command_key = Some(next_value(args, &mut i, "--set-command-key")?)
             }
             "--print-bind" => cli.print_bind = true,
+            "--print-rows" => cli.print_rows = true,
             "--shell" => {
                 let shell = next_value(args, &mut i, "--shell")?;
                 if shell != "bash" && shell != "zsh" {
@@ -226,6 +236,14 @@ fn run_set_command_key(path: &Path, spec: &str) -> ! {
              wake key keeps priority"
         );
     }
+    std::process::exit(0);
+}
+
+/// `--print-rows`: desktop bar height for the stored history, one integer.
+/// Fully headless; always exits.
+fn run_print_rows(path: &Path) -> ! {
+    let store = storage::load(path);
+    println!("{}", state::bar_rows(store.history.len()));
     std::process::exit(0);
 }
 
@@ -302,25 +320,49 @@ fn run(
     }
     let mut guard = EscGuard::new();
 
+    // Window auto-fit, resolved once: a summoned bar owns its window, unless
+    // `XC_ROWS` pinned the height or `XC_NO_FIT` opted out. The X11 fallback
+    // covers the terminals that ignore the in-band resize escape.
+    let env = |key: &str| std::env::var_os(key).and_then(|v| v.into_string().ok());
+    let fit_on = fit::enabled(
+        summon,
+        env("XC_ROWS").as_deref(),
+        env("XC_NO_FIT").as_deref(),
+    );
+    let fit_wm = fit_on
+        && fit::wm_resize_applies(
+            env("DISPLAY").as_deref(),
+            env("WAYLAND_DISPLAY").as_deref(),
+            fit::which("xdotool", env("PATH").as_deref()).is_some(),
+        );
+    let mut pending: Option<(u16, u8)> = None;
+
     loop {
+        fit_window(fit_on, fit_wm, &mut pending, &app)?;
         terminal.draw(|f| render::draw(f, &app))?;
         if event::poll(POLL_TIMEOUT)? {
-            if let Event::Key(key) = event::read()? {
-                let mut events = guard.feed(key);
-                events.extend(resolve_held(&mut guard)?);
-                for key in events {
-                    if settings_page_owns(&app, &key) {
-                        // The settings page owns its keys; its pure transition
-                        // returns the new state + store (applied in place).
-                        app::apply_settings(&mut app, key, path);
-                    } else {
-                        // Key release/repeat is filtered inside `on_key`.
-                        let act = action::on_key(&app, key);
-                        app::apply(&mut app, act, pf, path);
+            match event::read()? {
+                // A resize from outside - the user dragging the window, or the
+                // terminal applying our own request - wins over the fit.
+                Event::Resize(_, _) => fit_adopt(&mut pending),
+                Event::Key(key) => {
+                    let mut events = guard.feed(key);
+                    events.extend(resolve_held(&mut guard)?);
+                    for key in events {
+                        if settings_page_owns(&app, &key) {
+                            // The settings page owns its keys; its pure transition
+                            // returns the new state + store (applied in place).
+                            app::apply_settings(&mut app, key, path);
+                        } else {
+                            // Key release/repeat is filtered inside `on_key`.
+                            let act = action::on_key(&app, key);
+                            app::apply(&mut app, act, pf, path);
+                        }
                     }
                 }
+                // Mouse events and friends: fall through, redraw above.
+                _ => {}
             }
-            // Event::Resize (and mouse events): fall through, redraw above.
         }
         if app.quit {
             break;
@@ -328,6 +370,89 @@ fn run(
     }
     storage::save(path, &app.store)?;
     Ok(())
+}
+
+/// Grow/shrink the terminal to the rows the bar needs. `pending` is
+/// `(height last asked for, tries spent)`: the request is repeated on the
+/// following ticks until the window reports that height - terminals apply it
+/// asynchronously and a WM may not have activated the window on the very
+/// first frame - and at most [`fit::MAX_TRIES`] times, so a terminal that
+/// ignores both mechanisms is not spammed once per tick. Both requests keep
+/// the current width: only the height is the bar's business. Best effort, a
+/// failing `xdotool` must never take the bar down, and the X11 fallback only
+/// fires for a focused window that provably belongs to this process tree.
+fn fit_window(on: bool, wm: bool, pending: &mut Option<(u16, u8)>, app: &App) -> Result<()> {
+    if !on {
+        return Ok(());
+    }
+    let want = fit::desired_rows(app);
+    let tries = match *pending {
+        Some((asked, n)) if asked == want => n,
+        _ => 0,
+    };
+    *pending = Some((want, tries));
+    if tries >= fit::MAX_TRIES {
+        return Ok(());
+    }
+    let (cols, rows) = crossterm::terminal::size()?;
+    if rows == want {
+        // Already there (or the terminal just honoured the request): stop.
+        *pending = Some((want, fit::MAX_TRIES));
+        return Ok(());
+    }
+    let mut out = stdout();
+    out.write_all(fit::resize_escape(want, cols).as_bytes())?;
+    out.flush()?;
+    if wm && focused_window_is_ours() {
+        let argv = fit::wm_resize_argv(want, cols);
+        let _ = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .status();
+    }
+    *pending = Some((want, tries + 1));
+    Ok(())
+}
+
+/// Pid of the X11 window that currently has input focus, via the chained
+/// `xdotool getactivewindow getwindowpid`. `None` on any spawn failure,
+/// non-zero exit (no active window, or no `_NET_WM_PID`) or a stdout that
+/// does not parse as a pid.
+#[cfg(unix)]
+fn focused_window_pid() -> Option<u32> {
+    let out = std::process::Command::new("xdotool")
+        .args(["getactivewindow", "getwindowpid"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    std::str::from_utf8(&out.stdout).ok()?.trim().parse().ok()
+}
+
+/// Whether the focused X11 window belongs to this process tree. Unprovable
+/// ownership (no pid, unreadable `/proc`, no ancestry link) is `false`: the
+/// fallback must never resize a window that is not ours.
+#[cfg(unix)]
+fn focused_window_is_ours() -> bool {
+    match focused_window_pid() {
+        Some(pid) => fit::pid_in_ancestry(pid, std::process::id(), fit::parent_pid),
+        None => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn focused_window_is_ours() -> bool {
+    false
+}
+
+/// A resize that came from outside (the user dragging the window, or the
+/// terminal applying our own request) wins: park the counter so the bar stops
+/// asking for the old height, and refit as soon as the candidate set wants a
+/// different one.
+fn fit_adopt(pending: &mut Option<(u16, u8)>) {
+    if let Some(p) = pending {
+        p.1 = fit::MAX_TRIES;
+    }
 }
 
 /// After [`EscGuard::feed`] held a lone Esc, wait up to
@@ -406,6 +531,7 @@ mod tests {
         assert_eq!(cli.command_key, None);
         assert_eq!(cli.set_command_key, None);
         assert!(!cli.print_bind);
+        assert!(!cli.print_rows);
         assert_eq!(cli.shell, "bash");
     }
 
@@ -416,6 +542,7 @@ mod tests {
             "--wake-key",
             "ctrl+g",
             "--print-bind",
+            "--print-rows",
             "--shell",
             "zsh",
             "--store",
@@ -425,6 +552,7 @@ mod tests {
         assert!(cli.summon);
         assert_eq!(cli.wake_key.as_deref(), Some("ctrl+g"));
         assert!(cli.print_bind);
+        assert!(cli.print_rows);
         assert_eq!(cli.shell, "zsh");
         assert_eq!(cli.store, PathBuf::from("/tmp/s.json"));
     }

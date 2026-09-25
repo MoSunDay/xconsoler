@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 use crate::alias::{self, AliasDef};
 use crate::keyspec;
 
-/// Hard cap on stored history entries.
-pub const MAX_HISTORY: usize = 10_000;
+/// Hard cap on stored history entries. Only the newest entries are kept:
+/// the store is trimmed after every load and every record, so the file
+/// stays small and startup never pays for a long history.
+pub const MAX_HISTORY: usize = 100;
 
 /// One recorded execution. The input is stored base64-encoded so arbitrary
 /// text (quotes, newlines, unicode) survives the JSON roundtrip untouched.
@@ -121,13 +123,23 @@ pub fn load(path: &Path) -> Store {
         Err(_) => return Store::default(),
     };
     match serde_json::from_str::<Store>(&data) {
-        Ok(store) => store,
+        Ok(mut store) => {
+            trim_history(&mut store.history);
+            store
+        }
         Err(_) => {
             let aside = sibling_path(path, ".corrupt");
             let _ = fs::rename(path, &aside);
             Store::default()
         }
     }
+}
+
+/// Drop all but the newest [`MAX_HISTORY`] entries (history is newest first).
+/// Applied on load and on record, so an oversized store shrinks the first
+/// time it is read.
+pub fn trim_history(history: &mut Vec<HistoryEntry>) {
+    history.truncate(MAX_HISTORY);
 }
 
 /// Serialize pretty JSON and atomically replace `path` (tmp file + rename).
@@ -237,6 +249,28 @@ mod tests {
         let path = dir.path().join("nested/dir/store.json");
         save(&path, &Store::default()).unwrap();
         assert!(path.is_file());
+    }
+
+    #[test]
+    fn load_trims_history_to_the_newest_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.json");
+        let mut store = Store::default();
+        for i in 0..(MAX_HISTORY + 25) {
+            store
+                .history
+                .push(HistoryEntry::new("browser", &format!("i{i}"), i as u64));
+        }
+        save(&path, &store).unwrap();
+
+        let loaded = load(&path);
+        assert_eq!(loaded.history.len(), MAX_HISTORY);
+        // newest-first order survives: the 25 oldest entries are gone
+        assert_eq!(loaded.history[0].input(), "i0");
+        assert_eq!(
+            loaded.history.last().unwrap().input(),
+            format!("i{}", MAX_HISTORY - 1)
+        );
     }
 
     #[test]

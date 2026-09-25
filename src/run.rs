@@ -206,6 +206,9 @@ mod tests {
         assert_eq!(reloaded.aliases.len(), 1);
     }
 
+    /// The highlighted shortcut row runs for a typed `<alias> <partial>`,
+    /// never the literal partial. History outranks those shortcut rows, so a
+    /// partial that also matches a recorded run puts that run on row 0.
     #[test]
     fn highlighted_shortcut_row_runs_for_a_typed_partial() {
         let (mut app, _dir, path) = setup();
@@ -229,8 +232,26 @@ mod tests {
         // History keeps the raw key so the shorthand stays replayable.
         assert_eq!(app.store.history[0].input(), "baidu");
 
-        // Moving the highlight down picks the other shortcut.
+        // Retyping the partial now also matches the run just recorded, and
+        // history outranks the alias-scoped shortcut rows: it owns row 0, so
+        // reaching `bing` takes one move past `baidu`.
         app.input = "t b".to_string();
+        assert_eq!(
+            state::candidates(&app),
+            vec![
+                Candidate::History { idx: 0 },
+                Candidate::Shortcut {
+                    alias: "t".to_string(),
+                    key: "baidu".to_string()
+                },
+                Candidate::Shortcut {
+                    alias: "t".to_string(),
+                    key: "bing".to_string()
+                },
+            ],
+            "history first, then the alias's own shortcut keys"
+        );
+        apply(&mut app, Action::MoveDown, Platform::Linux, &path);
         apply(&mut app, Action::MoveDown, Platform::Linux, &path);
         apply(&mut app, Action::Execute, Platform::Linux, &path);
         assert_eq!(

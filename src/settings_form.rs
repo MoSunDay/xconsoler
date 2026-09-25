@@ -12,6 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::alias::{self, AliasDef};
 use crate::storage::Store;
+use crate::textedit::{self, Motion};
 
 /// What the wizard is collecting.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +70,8 @@ pub struct Form {
     pub shortcut_key: String,
     pub shortcut_value: String,
     pub input: String,
+    /// Char index of the text caret inside `input` (`0..=input.chars().count()`).
+    pub caret: usize,
     pub error: Option<String>,
 }
 
@@ -81,7 +84,7 @@ pub enum FormOutcome {
     Cancel,
     /// The wizard finished; apply this submission.
     Submit(Submission),
-    /// Ctrl+C.
+    /// Ctrl+C / Ctrl+D.
     Quit,
 }
 
@@ -98,6 +101,7 @@ pub fn new_alias() -> Form {
         shortcut_key: String::new(),
         shortcut_value: String::new(),
         input: String::new(),
+        caret: 0,
         error: None,
     }
 }
@@ -135,6 +139,7 @@ pub fn new_edit_command(alias: &str, linux: Option<&str>, macos: Option<&str>) -
         },
         step: 0,
         input: linux.clone(),
+        caret: linux.chars().count(),
         linux,
         macos: macos.unwrap_or_default().to_string(),
         ..new_alias()
@@ -152,31 +157,124 @@ pub fn step_count(f: &Form) -> usize {
 }
 
 /// One key transition: `(new form, outcome)`. Only `Press` events count.
+///
+/// The bottom line is readline-style: a real char-index caret, char/word
+/// motions, and the shell's edit keys. Ctrl+D / Ctrl+C quit in any state.
 pub fn handle_key(f: &Form, store: &Store, key: KeyEvent) -> (Form, FormOutcome) {
     if key.kind != KeyEventKind::Press {
         return (f.clone(), FormOutcome::Active);
     }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    // Alt+Ctrl is an undefined combination: the bar treats it as a no-op.
+    if ctrl && alt {
+        return (f.clone(), FormOutcome::Active);
+    }
     let mut next = f.clone();
     match key.code {
         KeyCode::Char('c') if ctrl => (next, FormOutcome::Quit),
+        KeyCode::Char('d') if ctrl && !alt => (next, FormOutcome::Quit),
         KeyCode::Esc => (next, FormOutcome::Cancel),
         KeyCode::Enter => advance(f, store),
         KeyCode::Backspace if key.modifiers.is_empty() => {
-            next.input.pop();
+            edit_with(&mut next, textedit::backspace);
+            (next, FormOutcome::Active)
+        }
+        KeyCode::Delete if !ctrl && !alt => {
+            edit_with(&mut next, textedit::delete);
+            (next, FormOutcome::Active)
+        }
+        // Ctrl+H is Backspace (some terminals also report it as Backspace).
+        KeyCode::Char('h') if ctrl => {
+            edit_with(&mut next, textedit::backspace);
+            (next, FormOutcome::Active)
+        }
+        KeyCode::Char('k') if ctrl => {
+            edit_with(&mut next, textedit::kill_to_end);
             (next, FormOutcome::Active)
         }
         KeyCode::Char('u') if ctrl => {
-            next.input.clear();
+            edit_with(&mut next, textedit::kill_to_start);
             (next, FormOutcome::Active)
         }
+        KeyCode::Char('w') if ctrl => {
+            edit_with(&mut next, textedit::kill_word);
+            (next, FormOutcome::Active)
+        }
+        KeyCode::Char('t') if ctrl => {
+            edit_with(&mut next, textedit::transpose);
+            (next, FormOutcome::Active)
+        }
+        KeyCode::Char('a') if ctrl => {
+            move_caret(&mut next, Motion::Home);
+            (next, FormOutcome::Active)
+        }
+        KeyCode::Char('e') if ctrl => {
+            move_caret(&mut next, Motion::End);
+            (next, FormOutcome::Active)
+        }
+        KeyCode::Char('b') if ctrl => {
+            move_caret(&mut next, Motion::Left);
+            (next, FormOutcome::Active)
+        }
+        KeyCode::Char('f') if ctrl => {
+            move_caret(&mut next, Motion::Right);
+            (next, FormOutcome::Active)
+        }
+        KeyCode::Char('b') if alt => {
+            move_caret(&mut next, Motion::WordLeft);
+            (next, FormOutcome::Active)
+        }
+        KeyCode::Char('f') if alt => {
+            move_caret(&mut next, Motion::WordRight);
+            (next, FormOutcome::Active)
+        }
+        // Modified arrows are word motions; plain arrows are char motions.
+        KeyCode::Left if ctrl || alt => {
+            move_caret(&mut next, Motion::WordLeft);
+            (next, FormOutcome::Active)
+        }
+        KeyCode::Right if ctrl || alt => {
+            move_caret(&mut next, Motion::WordRight);
+            (next, FormOutcome::Active)
+        }
+        KeyCode::Left => {
+            move_caret(&mut next, Motion::Left);
+            (next, FormOutcome::Active)
+        }
+        KeyCode::Right => {
+            move_caret(&mut next, Motion::Right);
+            (next, FormOutcome::Active)
+        }
+        KeyCode::Home => {
+            move_caret(&mut next, Motion::Home);
+            (next, FormOutcome::Active)
+        }
+        KeyCode::End => {
+            move_caret(&mut next, Motion::End);
+            (next, FormOutcome::Active)
+        }
+        // Plain chars (ALT-modified ones are the launcher's wake keys).
         KeyCode::Char(c) if !ctrl && !alt => {
-            next.input.push(c);
+            let (input, caret) = textedit::insert(&next.input, next.caret, c);
+            next.input = input;
+            next.caret = caret;
             (next, FormOutcome::Active)
         }
         _ => (next, FormOutcome::Active),
     }
+}
+
+/// Apply one `textedit` operation, keeping `input` and `caret` in sync.
+fn edit_with(form: &mut Form, edit: fn(&str, usize) -> (String, usize)) {
+    let (input, caret) = edit(&form.input, form.caret);
+    form.input = input;
+    form.caret = caret;
+}
+
+/// Move the caret without touching the text.
+fn move_caret(form: &mut Form, motion: Motion) {
+    form.caret = textedit::motion(&form.input, form.caret, motion);
 }
 
 /// Enter: validate the current field; on success store it and advance (or
@@ -184,6 +282,7 @@ pub fn handle_key(f: &Form, store: &Store, key: KeyEvent) -> (Form, FormOutcome)
 fn advance(f: &Form, store: &Store) -> (Form, FormOutcome) {
     let mut next = f.clone();
     next.input = f.input.trim().to_string();
+    next.caret = next.input.chars().count();
     match validate_step(f, store) {
         Err(e) => {
             next.error = Some(e);
@@ -197,6 +296,7 @@ fn advance(f: &Form, store: &Store) -> (Form, FormOutcome) {
             // Some steps start prefilled: Enter accepts the current text,
             // Ctrl+U clears it (edit-command's macos step).
             next.input = prefill(&next);
+            next.caret = next.input.chars().count();
             if next.step >= step_count(f) {
                 (next.clone(), FormOutcome::Submit(build_submission(&next)))
             } else {
@@ -352,6 +452,10 @@ fn build_submission(f: &Form) -> Submission {
 }
 
 #[cfg(test)]
+#[path = "settings_form_edit_tests.rs"]
+mod edit_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -394,11 +498,15 @@ mod tests {
     fn typing_edits_and_backspaces_the_input() {
         let store = empty_store();
         let f = type_str(&new_alias(), "ab", &store);
-        assert_eq!(f.input, "ab");
+        assert_eq!(
+            (f.input.as_str(), f.caret),
+            ("ab", 2),
+            "typing moves the caret"
+        );
         let (f, _) = handle_key(&f, &store, key(KeyCode::Backspace));
-        assert_eq!(f.input, "a");
+        assert_eq!((f.input.as_str(), f.caret), ("a", 1));
         let (f, _) = handle_key(&f, &store, ctrl('u'));
-        assert_eq!(f.input, "");
+        assert_eq!((f.input.as_str(), f.caret), ("", 0));
     }
 
     #[test]

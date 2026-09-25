@@ -21,6 +21,7 @@ xconsoler                                  # default store location
 xconsoler --store ~/x.json
 xconsoler --summon                         # shell-keybind mode (see SSH section)
 xconsoler --print-bind [--shell zsh]       # emit the shell binding line
+xconsoler --print-rows                     # print bar height in rows (used by scripts/xc-bar)
 xconsoler --set-wake-key alt+j             # change + persist the wake key
 xconsoler -h | --help                      # usage
 ```
@@ -44,22 +45,50 @@ again on exit, so your shell prompt can re-apply its own).
 | `Enter`                | run selected match / submit `:` command |
 | `Esc`                  | hide the bar (quits in `--summon` mode) |
 | `↑` `↓` / `Tab`        | move the candidate highlight            |
-| `Backspace`            | delete last char                       |
-| `Ctrl+U`               | clear the input                        |
-| `Ctrl+C`               | quit (any state)                       |
+| `Ctrl+N` / `Ctrl+P`    | move the candidate highlight down/up    |
+| `←` `→`                | move the text caret one char            |
+| `Ctrl+B` / `Ctrl+F`    | move the text caret one char left/right |
+| `Ctrl+←` `Ctrl+→` (or `Alt+B`/`Alt+F`) | move the caret one word left/right |
+| `Home` / `End` (or `Ctrl+A`/`Ctrl+E`) | caret to line start/end  |
+| `Backspace` (`Ctrl+H`) | delete the char before the caret        |
+| `Delete`               | delete the char under the caret         |
+| `Ctrl+W`               | delete the whitespace-delimited word before the caret |
+| `Ctrl+U` / `Ctrl+K`    | kill from the caret to the line start/end |
+| `Ctrl+T`               | transpose the two chars around the caret |
+| `Ctrl+C` / `Ctrl+D`    | quit (any state)                        |
+
+The input line has a real text caret, readline-style: tokens are inserted and
+removed at the caret, not at the end, and the box scrolls sideways once the
+text no longer fits so the caret stays visible.
 
 The bar draws an **input box**, a **candidate list** and one status line
 (no window title). With an empty input the list shows your **recent history
 only** - newest first, deduplicated, up to **10 rows**. Typing switches it to
 the ranked list of up to **5 candidates**: matching history first (newest
 first), then concrete registered shortcuts by fuzzy score, which only fill
-the slots history leaves. `<alias> <partial>` lists that alias's matching
-shortcuts - a shortcut is a key such as `baidu` mapped to a concrete value,
-and bare alias names never show up as rows of their own. `↑`/`↓`/`Tab` move
-the highlight - the window scrolls once you reach its bottom - and `Enter`
-runs the highlighted row: a history row replays its recorded pair, a shortcut
-row runs the registered value. The whole alias table lives on the `/settings`
-page.
+the slots history leaves. `<alias> <partial>` narrows those shortcut rows to
+that alias's matching keys - a shortcut is a key such as `baidu` mapped to a
+concrete value - while matching history still leads and bare alias names
+never show up as rows of their own. `↑`/`↓`/`Tab` move the highlight - the
+window scrolls once you reach its bottom - and `Enter` runs the highlighted
+row: a history row replays its recorded pair, a shortcut row runs the
+registered value. The whole alias table lives on the `/settings` page.
+
+**The window follows the candidate set while the bar is open.** Every state
+asks for its own height: 4 rows with nothing to show, otherwise 6 plus one
+row per candidate (16 at most), 13 for the palette's 7 commands, 24 for
+`/settings`. So the bar re-fits its own window whenever that number changes -
+you typing a query, clearing it, opening or closing the palette. It first
+writes the in-band request `ESC[8;<rows>;<cols>t`; terminals that ignore it
+(xterm without `allowWindowOps`, VTE, alacritty) are covered under X11 by
+`xdotool getactivewindow windowsize --usehints <cols> <rows>`, which sizes in
+character cells and is skipped under Wayland, where the compositor decides.
+The fallback only ever touches a window that provably belongs to this process
+tree: the focused window's pid must be ours or one of our ancestors. Each
+height is requested at most three times and the bar stops asking as soon as
+the terminal reports it, while a resize from outside - you dragging the
+window - wins and is adopted. Summon mode only, and `XC_ROWS`/`XC_NO_FIT`
+override it as described under the desktop hotkey below.
 
 ## Built-in aliases
 
@@ -210,7 +239,7 @@ xconsoler --command-key ctrl+k       # this run only, not persisted
 ## Settings page (`/settings`)
 
 Type `/settings` and press Enter for a full-screen alias manager
-(`Esc` or `q` returns to the bar):
+(`Esc` or `q` returns to the bar; `Ctrl+C`/`Ctrl+D` quits):
 
 The table has one row per alias and five columns —
 `name | triggers | linux | macos | shortcuts` (missing commands show `—`,
@@ -226,8 +255,9 @@ long commands are truncated with `…`):
   one of its triggers/shortcuts, which routes to that alias): key → value.
 * `t` — wizard for a new trigger on the selected alias.
 * `e` — edit the selected alias's linux and macos commands; both steps are
-  prefilled with the current values, `Ctrl+U` clears a field and a blank
-  macos keeps mirroring linux.
+  prefilled with the current values, `Ctrl+U` kills from the caret back to
+  the start of a field (`Ctrl+K` kills to the end) and a blank macos keeps
+  mirroring linux.
 * `d` — delete the selection: a shortcut row drops just that shortcut, a
   trigger row just that trigger, an alias row the whole alias (built-ins
   refuse; override them instead).
@@ -243,7 +273,7 @@ Every change is saved to `store.json` immediately.
   `xconsoler --set-command-key <spec>`.
 * Inputs are stored as **base64 of the plain text**, so quotes/unicode/newlines
   round-trip safely and nothing secret-looking is kept in cleartext.
-* History: up to **10 000** entries, newest first, deduplicated per
+* History: up to **100** entries, newest first, deduplicated per
   `alias + input` (re-running moves the entry to the top). **Failed runs are
   never recorded** — see the placeholder section above.
 * Matching: fuzzy over `label + input` for history, and over
@@ -261,7 +291,7 @@ bind -n M-d run -b 'xconsoler'
 ```
 
 `run -b` keeps tmux responsive while the launcher runs in a background pane;
-press `Esc` to hide it, `Ctrl+C` to quit. Without tmux, use the
+press `Esc` to hide it, `Ctrl+C`/`Ctrl+D` to quit. Without tmux, use the
 SSH summon flow below, or just run `xconsoler` in a spare terminal/tab and
 use `alt+d` to wake the bar and `Esc` to hide it again.
 
@@ -323,12 +353,15 @@ default. The TUI itself shrinks the list into whatever it is given: a framed
 block while the border/title and a row fit, bare rows in a slim strip, with
 the key hints the first thing to go - so `XC_ROWS=4` is a usable one-liner
 strip. `/settings` still draws its table in place from ~8 rows up; below that
-it runs out of room. `XC_ROWS` pins a fixed height, `XC_COLS=140` pins the
-old wide bar (and skips the pixel resize) when `/settings` wants the room,
-and `XC_PRINT_ROWS=1` prints the computed height and exits. The requested **0.7 alpha** is pinned as
-`background-transparency-percent=30`: the host terminal blends 70% bar with
-30% desktop showing through. Override it with `XC_ALPHA=0.7` (0..1 opacity)
-or `XC_TRANS=45` (VTE transparency percent, wins over `XC_ALPHA`).
+it runs out of room. `XC_ROWS` pins a fixed height, `XC_NO_FIT=1` opts out
+of the window auto-fit entirely (the bar keeps the size the window was
+opened with and never re-fits it while you type), `XC_COLS=140` pins the old
+wide bar (and skips the pixel resize) when `/settings` wants the room, and
+`XC_PRINT_ROWS=1` prints the computed height and exits. The requested **0.7
+alpha** is pinned as `background-transparency-percent=30`: the host terminal
+blends 70% bar with 30% desktop showing through. Override it with
+`XC_ALPHA=0.7` (0..1 opacity) or `XC_TRANS=45` (VTE transparency percent,
+wins over `XC_ALPHA`).
 
 **No window header**: the profile also turns gnome-terminal's client-side
 headerbar off (a global `org.gnome.Terminal.Legacy.Settings` key, written

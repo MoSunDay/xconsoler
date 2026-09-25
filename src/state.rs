@@ -12,6 +12,25 @@ use crate::storage::{self, Store};
 pub const RECENT_LIMIT: usize = 10;
 /// Max candidates ranked once the input is non-empty.
 pub const CANDIDATE_LIMIT: usize = 5;
+/// Tallest the desktop bar window is ever summoned to (rows): the 6 fixed
+/// rows above the list (3-row input box + 2-row title/borders + 1-row status)
+/// plus every row [`RECENT_LIMIT`] lets the list show. Derived, not
+/// hard-coded, so the cap can never silently drift from the list geometry.
+pub const MAX_BAR_ROWS: u16 = (6 + RECENT_LIMIT) as u16;
+
+/// Rows the desktop bar wants for a store holding `history_len` entries:
+/// the 6 fixed rows (3-row input box + 2 rows of candidate-list
+/// frame/title + 1-row status line) plus one row per recent entry (up to
+/// [`RECENT_LIMIT`]). An empty store gets the bare box; the result never
+/// exceeds [`MAX_BAR_ROWS`]. Exposed headlessly as `--print-rows`, so
+/// `scripts/xc-bar` can size the terminal without a scripting runtime.
+pub fn bar_rows(history_len: usize) -> u16 {
+    if history_len == 0 {
+        4
+    } else {
+        (6 + history_len.min(RECENT_LIMIT) as u16).min(MAX_BAR_ROWS)
+    }
+}
 
 /// Whether the launcher bar is on screen. New apps start [`Visibility::Shown`]
 /// — a fresh launch must be visible, not look like it exited instantly.
@@ -36,6 +55,9 @@ pub struct App {
     pub store: Store,
     pub aliases: Vec<AliasDef>,
     pub input: String,
+    /// Text caret: char index into `input` (`0..=char_count`), owned by
+    /// `crate::textedit`. Distinct from `cursor`, the candidate highlight.
+    pub caret: usize,
     /// Selected index into `state::candidates`.
     pub cursor: usize,
     pub visibility: Visibility,
@@ -67,6 +89,7 @@ pub fn new(store: Store, summon: bool) -> App {
         store,
         aliases,
         input: String::new(),
+        caret: 0,
         cursor: 0,
         visibility: Visibility::Shown,
         status: None,
@@ -79,9 +102,11 @@ pub fn new(store: Store, summon: bool) -> App {
     }
 }
 
-/// Ranked candidates for the current input (trimmed). An empty input lists up
-/// to [`RECENT_LIMIT`] recent history rows; a typed input lists up to
-/// [`CANDIDATE_LIMIT`], history before shortcuts.
+/// Ranked candidates for the current input. An empty input lists up to
+/// [`RECENT_LIMIT`] recent history rows; a typed input lists up to
+/// [`CANDIDATE_LIMIT`]. Either way history outranks every shortcut row:
+/// [`matcher::ranked_candidates`] owns that rule, so the empty bar and the
+/// typed bar cannot drift apart.
 pub fn candidates(app: &App) -> Vec<Candidate> {
     let query = app.input.trim();
     // `:`/`/` inputs are command lines (palette or validation), never alias
@@ -89,18 +114,14 @@ pub fn candidates(app: &App) -> Vec<Candidate> {
     if query.starts_with('/') || query.starts_with(':') {
         return Vec::new();
     }
-    if query.is_empty() {
-        return matcher::candidates(&app.store, &app.aliases, "", RECENT_LIMIT);
-    }
-    // `<alias> <partial>` switches to that alias's concrete shortcuts;
-    // anything else (including a bare alias) keeps the normal history-first
-    // ranking.
-    let shortcuts = matcher::shortcut_candidates(&app.aliases, &app.input, CANDIDATE_LIMIT);
-    if shortcuts.is_empty() {
-        matcher::candidates(&app.store, &app.aliases, query, CANDIDATE_LIMIT)
+    let limit = if query.is_empty() {
+        RECENT_LIMIT
     } else {
-        shortcuts
-    }
+        CANDIDATE_LIMIT
+    };
+    // The raw input, not `query`: `<alias> <partial>` needs its space to tell
+    // the alias-scoped shortcut rows apart from a plain fuzzy query.
+    matcher::ranked_candidates(&app.store, &app.aliases, &app.input, limit)
 }
 
 /// The candidate the cursor points at. An out-of-range cursor falls back to
@@ -138,6 +159,9 @@ mod tests {
         new(store, false)
     }
 
+    /// `<alias> <partial>` lists that alias's concrete shortcut keys once a
+    /// space is typed. The fixture has no history, so no history row can
+    /// outrank them here - see `typed_alias_partial_keeps_history_first`.
     #[test]
     fn shortcut_context_lists_shortcuts_once_a_space_is_typed() {
         let mut app = app_with_shortcut();
@@ -179,6 +203,28 @@ mod tests {
         );
     }
 
+    /// History has the highest priority, so the `<alias> <partial>` picker
+    /// keeps a matching recorded run above the alias's own shortcut keys.
+    #[test]
+    fn typed_alias_partial_keeps_history_first() {
+        let mut app = app_with_shortcut();
+        record(&mut app.store, "br", "baidu", 1);
+
+        app.input = "br b".to_string();
+        assert_eq!(
+            candidates(&app),
+            vec![
+                Candidate::History { idx: 0 },
+                Candidate::Shortcut {
+                    alias: "br".to_string(),
+                    key: "baidu".to_string()
+                },
+            ],
+            "the recorded run leads the narrowed shortcut rows"
+        );
+        assert_eq!(selected(&app), Some(Candidate::History { idx: 0 }));
+    }
+
     #[test]
     fn new_starts_shown_with_merged_aliases() {
         let app = new(Store::default(), false);
@@ -205,6 +251,14 @@ mod tests {
         assert!(app.summon);
         assert_eq!(app.visibility, Visibility::Shown);
         assert_eq!(app.wake, keyspec::parse("ctrl+g").unwrap());
+    }
+
+    #[test]
+    fn bar_rows_follow_recent_history() {
+        assert_eq!(bar_rows(0), 4);
+        assert_eq!(bar_rows(1), 7);
+        assert_eq!(bar_rows(RECENT_LIMIT), MAX_BAR_ROWS);
+        assert_eq!(bar_rows(10_000), MAX_BAR_ROWS);
     }
 
     #[test]
