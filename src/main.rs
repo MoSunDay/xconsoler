@@ -242,10 +242,15 @@ fn run_set_command_key(path: &Path, spec: &str) -> ! {
 }
 
 /// `--print-rows`: desktop bar height for the stored history, one integer.
-/// Fully headless; always exits.
+///
+/// Same rule as [`fit::stable_rows`]: room for the history an empty bar
+/// lists and never less than the typed candidate set, so the launch geometry
+/// is also the height the bar keeps for the session. Fully headless; always
+/// exits.
 fn run_print_rows(path: &Path) -> ! {
     let store = storage::load(path);
-    println!("{}", state::bar_rows(store.history.len()));
+    let visible = store.history.len().max(state::CANDIDATE_LIMIT);
+    println!("{}", state::bar_rows(visible));
     std::process::exit(0);
 }
 
@@ -322,11 +327,12 @@ fn run(
     }
     let mut guard = EscGuard::new();
 
-    // Window auto-fit, resolved once: the bar follows its candidate set
-    // unless `XC_ROWS` pinned the height or `XC_NO_FIT` opted out. Inside a
-    // tmux pane the request travels through the passthrough envelope and
-    // targets the outer window; the X11 fallback covers the terminals that
-    // ignore the in-band resize escape.
+    // Window auto-fit, resolved once: the bar keeps one session height
+    // unless `XC_ROWS` pinned it or `XC_NO_FIT` opted out, so typing only
+    // changes the candidate list's contents, never the window. Inside a tmux
+    // pane the request travels through the passthrough envelope and targets
+    // the outer window; the X11 fallback covers the terminals that ignore the
+    // in-band resize escape.
     let env = |key: &str| std::env::var_os(key).and_then(|v| v.into_string().ok());
     let fit_on = fit::enabled(env("XC_ROWS").as_deref(), env("XC_NO_FIT").as_deref());
     let pane = if fit_on {
@@ -352,10 +358,13 @@ fn run(
     // Height the window had at startup (and the last one the user picked):
     // the size the fit restores on the way out.
     let mut baseline = crossterm::terminal::size()?.1;
+    // The one height the normal bar asks for all session; `--print-rows` and
+    // `scripts/xc-bar` compute the launch geometry with the same rule.
+    let stable_rows = fit::stable_rows(&app);
     let mut pending: Option<Asked> = None;
 
     loop {
-        fit_window(&fit, &mut pending, &app, Instant::now())?;
+        fit_window(&fit, &mut pending, &app, stable_rows, Instant::now())?;
         terminal.draw(|f| render::draw(f, &app))?;
         if event::poll(POLL_TIMEOUT)? {
             match event::read()? {
@@ -364,7 +373,7 @@ fn run(
                 // the user picked becomes the one restored at exit; our own
                 // request is the one that reports the height we asked for.
                 Event::Resize(_, rows) => {
-                    if rows != fit::desired_rows(&app) {
+                    if rows != fit::desired_rows(&app, stable_rows) {
                         baseline = rows;
                     }
                     fit_adopt(&mut pending);
@@ -426,7 +435,8 @@ struct Asked {
     at: Instant,
 }
 
-/// Grow/shrink the terminal to the rows the bar needs. `pending` is the
+/// Move the terminal to the height the bar wants for the session. `pending`
+/// is the
 /// height the fit last asked for; it is repeated until the window reports that
 /// height, because terminals apply the request asynchronously and a WM may not
 /// have activated the window on the very first frames. [`fit::may_ask`] paces
@@ -435,11 +445,17 @@ struct Asked {
 /// height is the bar's business. Best effort, a failing `xdotool` must never
 /// take the bar down, and the X11 fallback only fires for a focused window
 /// that provably belongs to this process tree.
-fn fit_window(fit: &Fit, pending: &mut Option<Asked>, app: &App, now: Instant) -> Result<()> {
+fn fit_window(
+    fit: &Fit,
+    pending: &mut Option<Asked>,
+    app: &App,
+    stable_rows: u16,
+    now: Instant,
+) -> Result<()> {
     if !fit.on {
         return Ok(());
     }
-    let want = fit::desired_rows(app);
+    let want = fit::desired_rows(app, stable_rows);
     let mut asked = match *pending {
         Some(asked) if asked.want == want => asked,
         // A new wanted height: ask right away, whatever the last one cost.

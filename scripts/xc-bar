@@ -27,15 +27,15 @@
 # as "XConsoler", the WM_CLASS this script hands the terminal below.
 set -u
 # --- height -------------------------------------------------------------
-# 4 rows (the 3-row input box + the status/hints row) with an empty store,
-# 2 more for the candidate list's own border/title plus one row per recent
-# entry once there is history. The cap is `state::MAX_BAR_ROWS` = 6 + 10 = 16:
-# the 6 fixed rows (3-row input box + 2-row candidate-list frame/title +
-# 1-row status line) plus the 10 recent entries `state::RECENT_LIMIT` shows
-# by default. The TUI shrinks the list into any bar, so a store that cannot
-# be read -- corrupt ones count as no history, the launcher starts empty from
-# them -- never grows past that cap; the number comes from the launcher
-# itself (`--print-rows`) with python3 as the fallback. XC_ROWS pins a fixed
+# The bar is sized once and keeps that height for the session, so typing a
+# query only changes the candidate list's contents. The height carries the
+# store's recent history (3-row input box + 2-row list frame/title + 1-row
+# status line + one row per entry, 6 + 10 = 16 at most via
+# `state::MAX_BAR_ROWS`/`state::RECENT_LIMIT`) and is never less than room
+# for the typed candidate set (5 entries -> 11 rows). The number comes from
+# the launcher itself (`--print-rows`) with python3 as the fallback; a store
+# that cannot be read -- corrupt ones count as no history, the launcher
+# starts empty from them -- never grows past the cap. XC_ROWS pins a fixed
 # height; XC_PRINT_ROWS prints the computed one and exits (used by tests).
 #
 # Resolve the binary up front: gnome-terminal-server can run with a stripped
@@ -68,7 +68,8 @@ try:
     history = json.load(open(sys.argv[1])).get("history") or []
 except Exception:
     history = []
-print(4 if not history else min(6 + min(len(history), 10), 16))  # 16 = state::MAX_BAR_ROWS (6 + RECENT_LIMIT)
+visible = max(len(history), 5)  # 5 = state::CANDIDATE_LIMIT (typed candidates)
+print(min(6 + min(visible, 10), 16))  # 16 = state::MAX_BAR_ROWS (6 + RECENT_LIMIT)
 PY
 )
         fi ;;

@@ -74,14 +74,17 @@ window scrolls once you reach its bottom - and `Enter` runs the highlighted
 row: a history row replays its recorded pair, a shortcut row runs the
 registered value. The whole alias table lives on the `/settings` page.
 
-**The window follows the candidate set while the bar is open.** Every state
-asks for its own height: 4 rows with nothing to show, otherwise 6 plus one
-row per candidate (16 at most), 13 for the palette's 7 commands, 24 for
-`/settings`. So the bar re-fits its own window whenever that number changes -
-you typing a query, clearing it, opening or closing the palette - and a plain
-`xconsoler` run shrinks the terminal it was started from just like a summoned
-bar shrinks its own window; the size the window had at startup (or the last
-one you picked by dragging it) comes back when the bar exits. It first writes
+**The bar's frame is sized once and then stays put.** Its height carries the
+stored history an empty bar lists (6 rows plus one per recent entry, 16 at
+most) and is never less than room for the typed candidate set (11 rows for
+the 5 candidates a query can rank). Typing a query, clearing it or replaying
+a command only changes the candidate list's *contents*, so the window cannot
+flicker under your fingers; the palette keeps one fixed height for its whole
+open session and only `/settings` - a full page, not a bar - grows the
+window. A plain `xconsoler` run shrinks the terminal it was started from just
+like a summoned bar shrinks its own window; the size the window had at
+startup (or the last one you picked by dragging it) comes back when the bar
+exits. It first writes
 the in-band request `ESC[8;<rows>;<cols>t`; terminals that ignore it (xterm
 without `allowWindowOps`, VTE, alacritty) are covered under X11 by `xdotool
 getactivewindow windowsize --usehints <cols> <rows>`, which sizes in character
@@ -143,11 +146,11 @@ Examples:
 
 The seeded `cd` alias copies through the [`arboard`](https://crates.io/crates/arboard)
 crate directly — no `xclip` / `wl-copy` / `xsel` / `pbcopy` binaries required
-(Linux needs X11 or XWayland). Its input is read as base64 and the decoded
-text goes on the clipboard (plain text that is not valid base64 is copied
-verbatim); history still stores inputs base64-encoded, so replaying a recorded
-`cd` copies exactly what was copied the first time. Override it with
-`:add cd <cmd> // <cmd>` if you prefer your own tool.
+(Linux needs X11 or XWayland). It reads its input as base64 and puts the
+decoded text on the clipboard (plain text that is not valid base64 is copied
+verbatim). History keeps the input as recorded — the base64 text — so the
+history row shows the stored form and a replay decodes it again the same way.
+Override it with `:add cd <cmd> // <cmd>` if you prefer your own tool.
 
 Placeholders:
 
@@ -320,8 +323,9 @@ Every change is saved to `store.json` immediately.
   without it counts as pre-v2 and gets the seeded defaults merged back in on
   the next load.
 * Inputs are stored as **base64 of the plain text**, so quotes/unicode/newlines
-  round-trip safely and nothing secret-looking is kept in cleartext. For
-  `cd`, that stored base64 decodes to the exact payload the clipboard gets.
+  round-trip safely and nothing secret-looking is kept in cleartext. A `cd`
+  run records the base64 text itself, so the history row shows the stored
+  form while the clipboard gets the decoded text.
 * History: up to **100** entries, newest first, deduplicated per
   `alias + input` (re-running moves the entry to the top). **Failed runs are
   never recorded** — see the placeholder section above.
@@ -393,18 +397,18 @@ background. The window is a **quarter of the screen wide**, centred, with its
 top edge following the mouse cursor - 52 cells wide, 4..16 tall, on a 1920px
 screen.
 
-Its height follows the store's **recent history**: 4 rows for an empty store
-(the 3-row input box + the status/hints row), 2 more for the list's own
-title/borders plus one per recent entry once there is history, topping out at
-16 for the 10 entries the list shows. A store that cannot be read (corrupt
-ones count as no history) or a missing python3 means at most the old 16-row
-default. The TUI itself shrinks the list into whatever it is given: a framed
+Its height is fixed for the session: room for the store's **recent history**
+(the 3-row input box + the list's title/borders + the status/hints row + one
+per recent entry, topping out at 16 for the 10 entries the list shows) and
+never less than room for the typed candidate set, so a query cannot resize
+the bar. A store that cannot be read (corrupt ones count as no history) or a
+missing python3 means the old 16-row default. The TUI itself shrinks the list into whatever it is given: a framed
 block while the border/title and a row fit, bare rows in a slim strip, with
 the key hints the first thing to go - so `XC_ROWS=4` is a usable one-liner
 strip. `/settings` still draws its table in place from ~8 rows up; below that
 it runs out of room. `XC_ROWS` pins a fixed height, `XC_NO_FIT=1` opts out
 of the window auto-fit entirely (the bar keeps the size the window was
-opened with and never re-fits it while you type), `XC_COLS=140` pins the old
+opened with, even for `/settings`), `XC_COLS=140` pins the old
 wide bar (and skips the pixel resize) when `/settings` wants the room, and
 `XC_PRINT_ROWS=1` prints the computed height and exits. The requested **0.7
 alpha** is pinned as `background-transparency-percent=30`: the host terminal
