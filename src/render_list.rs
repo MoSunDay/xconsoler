@@ -12,7 +12,7 @@ use crate::alias;
 use crate::matcher::Candidate;
 use crate::platform::{self, Platform};
 use crate::render::{clip, main_block, row_rect, segments_line};
-use crate::state::{self, App, CANDIDATE_LIMIT};
+use crate::state::{self, App};
 use crate::theme::{ACCENT, MUTED, SELECT_BG, SUBTLE, TEXT};
 
 /// Candidate list under the input box (hidden while the palette is open): one
@@ -26,7 +26,9 @@ pub(crate) fn draw_candidates(f: &mut Frame, app: &App, width: u16, y: u16) -> u
     // The block needs 2 border rows and the status/hints row 1; a terminal
     // with no room for both degrades to no list at all.
     let free = f.area().height.saturating_sub(y).saturating_sub(1) as usize;
-    let rows = cands.len().min(CANDIDATE_LIMIT).min(free.saturating_sub(2));
+    // `state::candidates` already caps the count (recent or ranked); here the
+    // list only shrinks to the rows the layout leaves free.
+    let rows = cands.len().min(free.saturating_sub(2));
     if rows == 0 {
         return y;
     }
@@ -148,6 +150,7 @@ mod tests {
     use crate::render_testkit::{
         app_with_history, app_with_recent_history, bg_cells, bg_rows, draw_on, history_rows, row_of,
     };
+    use crate::state::RECENT_LIMIT;
     use crate::theme::CURSOR;
 
     #[test]
@@ -172,13 +175,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_input_lists_only_the_ten_recent_history_rows() {
+    fn empty_input_lists_only_the_recent_history_rows() {
         let app = app_with_recent_history(12);
         let text = draw_on(&app, 80, 20);
         assert_eq!(
             history_rows(&text),
-            CANDIDATE_LIMIT,
-            "exactly the limit is drawn: {text}"
+            RECENT_LIMIT,
+            "exactly the recent limit is drawn: {text}"
         );
         assert!(text.contains("recent · 10 history"), "title: {text}");
         assert!(text.contains("cmd-11"), "newest entry: {text}");

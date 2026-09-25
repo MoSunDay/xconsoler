@@ -8,8 +8,10 @@ use crate::keyspec::{self, KeySpec};
 use crate::matcher::{self, Candidate};
 use crate::storage::{self, Store};
 
-/// Max candidates shown (and ranked) at once.
-pub const CANDIDATE_LIMIT: usize = 10;
+/// Max history rows on the empty bar (most recent successful runs first).
+pub const RECENT_LIMIT: usize = 10;
+/// Max candidates ranked once the input is non-empty.
+pub const CANDIDATE_LIMIT: usize = 5;
 
 /// Whether the launcher bar is on screen. New apps start [`Visibility::Shown`]
 /// — a fresh launch must be visible, not look like it exited instantly.
@@ -77,11 +79,15 @@ pub fn new(store: Store, summon: bool) -> App {
     }
 }
 
-/// Ranked candidates for the current input (trimmed), capped at
-/// [`CANDIDATE_LIMIT`].
+/// Ranked candidates for the current input (trimmed). An empty input lists up
+/// to [`RECENT_LIMIT`] recent history rows; a typed input lists up to
+/// [`CANDIDATE_LIMIT`], history before aliases.
 pub fn candidates(app: &App) -> Vec<Candidate> {
+    if app.input.trim().is_empty() {
+        return matcher::candidates(&app.store, &app.aliases, "", RECENT_LIMIT);
+    }
     // `<alias> <partial>` switches to that alias's named args; anything else
-    // (including a bare alias) keeps the normal history/alias ranking.
+    // (including a bare alias) keeps the normal history-first ranking.
     let args = matcher::arg_candidates(&app.aliases, &app.input, CANDIDATE_LIMIT);
     if args.is_empty() {
         matcher::candidates(&app.store, &app.aliases, app.input.trim(), CANDIDATE_LIMIT)
@@ -224,14 +230,33 @@ mod tests {
         );
     }
 
+    /// The empty bar respects the recent-history cap: aliases come back as
+    /// soon as a query character is typed.
     #[test]
-    fn candidates_respect_limit() {
+    fn empty_bar_lists_at_most_recent_limit() {
         let app = app_with_history();
-        assert!(candidates(&app).len() <= CANDIDATE_LIMIT);
+        assert!(candidates(&app).len() <= RECENT_LIMIT);
     }
 
-    /// The twist only applies to the empty bar: a typed query ranks history
-    /// and aliases together again.
+    /// A typed query caps at `CANDIDATE_LIMIT` and fills the slots with the
+    /// newest matching history entries before any alias row.
+    #[test]
+    fn typed_query_lists_at_most_five_history_first() {
+        let mut store = Store::default();
+        // Record oldest -> newest so `history[0]` is `hit0` once the loop ends.
+        for i in (0..8).rev() {
+            record(&mut store, "br", &format!("hit{i}"), (8 - i) as u64);
+        }
+        let mut app = new(store, false);
+        app.input = "hit".to_string();
+        let out = candidates(&app);
+        assert_eq!(out.len(), CANDIDATE_LIMIT);
+        assert_eq!(out[0], Candidate::History { idx: 0 });
+        assert_eq!(out[4], Candidate::History { idx: 4 });
+    }
+
+    /// The twist only applies to the empty bar: a typed query brings aliases
+    /// back, after every matching history entry.
     #[test]
     fn typed_query_brings_aliases_back() {
         let mut app = app_with_history();

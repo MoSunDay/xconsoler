@@ -1,4 +1,5 @@
-//! Candidate ranking: blend history entries and aliases by fuzzy score.
+//! Candidate ranking: matching history first (newest first), aliases by fuzzy
+//! score filling only the slots history leaves.
 
 use crate::alias::{self, AliasDef};
 use crate::fuzzy;
@@ -21,19 +22,14 @@ pub enum Candidate {
     },
 }
 
-const RECENCY_BONUS: usize = 40;
-const RECENCY_STEP: usize = 250;
-const ALIAS_BONUS: i32 = 15;
-
 /// Rank candidates for `query` (whitespace-trimmed).
 ///
 /// * Empty query: the most recent history entries only (newest first, no
 ///   alias rows), up to `limit`.
-/// * Otherwise: each history entry is scored with
-///   `fuzzy::score(query, "<entry_label> <input>")` plus a recency bonus of
-///   `40 - idx/250`; each alias is scored with
-///   `fuzzy::score(query, "<name> <shortcuts>")` plus 15. Results are sorted
-///   by score descending; ties put history (newest idx first) before aliases.
+/// * Otherwise: history entries whose `"<label> <input>"` fuzzy-matches
+///   `query` come first, in store order (newest first, no score sort); then
+///   aliases whose `"<name> <shortcuts>"` matches, by fuzzy score descending,
+///   ties by alias order. Aliases only fill the slots history leaves.
 pub fn candidates(
     store: &Store,
     aliases: &[AliasDef],
@@ -49,36 +45,45 @@ pub fn candidates(
             .collect();
     }
 
-    // (score, kind_rank, order, candidate): history kind_rank 0, alias 1.
-    let mut scored: Vec<(i32, u8, usize, Candidate)> = Vec::new();
+    // History hits stay in store order (newest first); no score sort.
+    let history: Vec<Candidate> = store
+        .history
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            let label = match alias::resolve(aliases, &entry.alias) {
+                Some(def) => alias::entry_label(def),
+                None => entry.alias.as_str(),
+            };
+            fuzzy::score(query, &format!("{} {}", label, entry.input())).is_some()
+        })
+        .map(|(idx, _)| Candidate::History { idx })
+        .collect();
 
-    for (idx, entry) in store.history.iter().enumerate() {
-        let label = match alias::resolve(aliases, &entry.alias) {
-            Some(def) => alias::entry_label(def),
-            None => entry.alias.as_str(),
-        };
-        let haystack = format!("{} {}", label, entry.input());
-        if let Some(s) = fuzzy::score(query, &haystack) {
-            let recency = RECENCY_BONUS.saturating_sub(idx / RECENCY_STEP) as i32;
-            scored.push((s + recency, 0, idx, Candidate::History { idx }));
-        }
-    }
-    for (order, def) in aliases.iter().enumerate() {
-        let haystack = format!("{} {}", def.name, def.shortcuts.join(" "));
-        if let Some(s) = fuzzy::score(query, &haystack) {
-            scored.push((
-                s + ALIAS_BONUS,
-                1,
-                order,
-                Candidate::Alias {
-                    name: def.name.clone(),
-                },
-            ));
-        }
-    }
+    // (score, alias order, candidate): only these rows get score-sorted.
+    let mut ranked: Vec<(i32, usize, Candidate)> = aliases
+        .iter()
+        .enumerate()
+        .filter_map(|(order, def)| {
+            let haystack = format!("{} {}", def.name, def.shortcuts.join(" "));
+            fuzzy::score(query, &haystack).map(|s| {
+                (
+                    s,
+                    order,
+                    Candidate::Alias {
+                        name: def.name.clone(),
+                    },
+                )
+            })
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
 
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-    scored.into_iter().take(limit).map(|t| t.3).collect()
+    history
+        .into_iter()
+        .chain(ranked.into_iter().map(|t| t.2))
+        .take(limit)
+        .collect()
 }
 
 /// Named-arg sub-candidates for a raw input of the form `<trigger> <partial>`.
@@ -249,6 +254,43 @@ mod tests {
             vec![
                 Candidate::History { idx: 0 },
                 Candidate::History { idx: 1 },
+                Candidate::Alias {
+                    name: "br".to_string()
+                },
+            ]
+        );
+    }
+
+    /// History order wins over fuzzy score: the older `gm` entry scores a
+    /// prefix bonus, yet the newer `br gm` entry is emitted first.
+    #[test]
+    fn newer_history_beats_higher_fuzzy_score() {
+        let mut store = Store::default();
+        store.history.push(history("br", "gm", 2));
+        store.history.push(history("gm", "x", 1));
+        let out = candidates(&store, &alias::defaults(), "gm", 10);
+        assert_eq!(
+            out,
+            vec![Candidate::History { idx: 0 }, Candidate::History { idx: 1 }]
+        );
+    }
+
+    /// Aliases only fill the slots history leaves: with one matching history
+    /// entry, `limit = 1` hides the alias and `limit = 2` shows it after.
+    #[test]
+    fn aliases_only_fill_the_slots_history_leaves() {
+        let mut store = Store::default();
+        store.history.push(history("br", "baidu", 1));
+        let aliases = alias::defaults();
+
+        assert_eq!(
+            candidates(&store, &aliases, "br", 1),
+            vec![Candidate::History { idx: 0 }]
+        );
+        assert_eq!(
+            candidates(&store, &aliases, "br", 2),
+            vec![
+                Candidate::History { idx: 0 },
                 Candidate::Alias {
                     name: "br".to_string()
                 },
