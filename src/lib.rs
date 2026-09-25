@@ -12,6 +12,7 @@ pub mod fit_tmux;
 pub mod fuzzy;
 pub mod history;
 pub mod keyspec;
+pub mod launch;
 pub mod matcher;
 pub mod platform;
 pub mod render;
