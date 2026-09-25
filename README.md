@@ -45,8 +45,10 @@ again on exit, so your shell prompt can re-apply its own).
 The bar draws an **input box**, a **candidate list** and one status line
 (no window title). With an empty input the list shows your **recent history
 only** - newest first, deduplicated, up to **10 rows**. Typing switches it to
-the fuzzy ranking (history and aliases together), and `<alias> <partial>`
-lists that alias's quick-launch entries (its named args). `↑`/`↓`/`Tab` move
+the ranked list of up to **5 candidates**: matching history first (newest
+first), then registered aliases by fuzzy score, which only fill the slots
+history leaves. `<alias> <partial>` lists that alias's quick-launch entries
+(its named args). `↑`/`↓`/`Tab` move
 the highlight - the window scrolls once you reach its bottom - and `Enter`
 runs the highlighted row: a history row replays its recorded pair, an alias
 row runs the alias, an arg row runs the mapped value. The whole alias table
@@ -197,7 +199,10 @@ Every change is saved to `store.json` immediately.
   `alias + input` (re-running moves the entry to the top). **Failed runs are
   never recorded** — see the placeholder section above.
 * Matching: fuzzy over `label + input` (history) and `name + shortcuts`
-  (aliases); an empty input lists the recent history only (up to 10 rows).
+  (aliases); an empty input lists the recent history only (up to 10 rows),
+  while a typed query ranks up to 5 candidates - matching history first
+  (newest first), then aliases by fuzzy score filling only the slots history
+  leaves.
 
 ## Global wake-up
 
