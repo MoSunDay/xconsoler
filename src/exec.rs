@@ -56,13 +56,16 @@ fn bg_probe(grace: &str) -> String {
     // The `\`-continuations below eat the newline and the next line's leading
     // whitespace, so the produced command keeps exactly one space per gap.
     // `$$` inside the subshell is still the probe shell's pid, and the trap
-    // turns the watchdog's TERM into a plain exit status.
+    // turns the watchdog's TERM into a plain exit status. The fast path kills
+    // the watchdog with SIGKILL: dash can swallow a TERM that lands in the
+    // first instants of the subshell's life, and a watchdog that survives
+    // turns a fast success into a false "still running" a second later.
     format!(
         "p=$!; if [ -z \"$p\" ]; then exit 0; fi; \
          trap 'exit {BG_STILL_RUNNING}' TERM; \
          ( sleep {grace}; kill -TERM $$ ) & w=$!; \
          wait \"$p\"; rc=$?; \
-         kill \"$w\" 2>/dev/null; wait \"$w\" 2>/dev/null; exit \"$rc\""
+         kill -9 \"$w\" 2>/dev/null; wait \"$w\" 2>/dev/null; exit \"$rc\""
     )
 }
 
@@ -520,7 +523,7 @@ mod tests {
             "trap 'exit 125' TERM; ",
             "( sleep 0.5; kill -TERM $$ ) & w=$!; ",
             "wait \"$p\"; rc=$?; ",
-            "kill \"$w\" 2>/dev/null; wait \"$w\" 2>/dev/null; exit \"$rc\""
+            "kill -9 \"$w\" 2>/dev/null; wait \"$w\" 2>/dev/null; exit \"$rc\""
         );
         assert_eq!(probe, expected);
         assert!(!probe.contains("  "), "stray double space in {probe:?}");
