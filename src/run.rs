@@ -28,15 +28,18 @@ pub fn execute(app: &mut App, platform: Platform, path: &Path) {
     // 2. Otherwise the selected candidate decides (shortcut => its key, mapped
     //    at run time; history => recorded alias + input). Errors surface as a
     //    status line.
+    // The third tuple element says the input came from a history entry, where
+    // it already is the payload a replay must copy verbatim.
     // The def is cloned so the borrow of `app` ends before we mutate the store.
-    let target: Result<(AliasDef, String), String> = match alias::resolve(&app.aliases, head) {
+    let target: Result<(AliasDef, String, bool), String> = match alias::resolve(&app.aliases, head)
+    {
         Some(def) => match shortcut_override(app, def, &rest) {
-            Some(key) => Ok((def.clone(), key)),
-            None => Ok((def.clone(), rest)),
+            Some(key) => Ok((def.clone(), key, false)),
+            None => Ok((def.clone(), rest, false)),
         },
         None => selected_target(app),
     };
-    let (def, input) = match target {
+    let (def, input, from_history) = match target {
         Ok(t) => t,
         Err(msg) => {
             app.status = Some((false, msg));
@@ -46,15 +49,21 @@ pub fn execute(app: &mut App, platform: Platform, path: &Path) {
 
     // Registered shortcuts (`br baidu`): the command sees the mapped value,
     // while history keeps the raw text so the shorthand stays replayable.
+    // For native clipboard aliases the mapped value is fresh base64 and the
+    // payload is its decode; `clipboard_forms` draws the run/record split.
     let run_input = exec::resolve_shortcuts(&def, &input);
+    let shortcut = run_input != input;
+    let native = exec::uses_native_clipboard(&def, platform);
+    let (payload, record_input) =
+        clipboard_forms(native, from_history, shortcut, &input, &run_input);
 
-    match exec::run_alias(&def, &run_input, platform) {
+    match exec::run_alias(&def, &payload, platform) {
         ExecOutcome::Success(_) => {
-            history::record(&mut app.store, &def.name, &input, now_secs());
-            let shown = if run_input.trim().is_empty() {
+            history::record(&mut app.store, &def.name, &record_input, now_secs());
+            let shown = if payload.trim().is_empty() {
                 def.name.clone()
             } else {
-                run_input.clone()
+                payload.clone()
             };
             crate::app::set_input(app, String::new());
             // The run succeeded either way; only persistence can still fail.
@@ -103,14 +112,16 @@ fn shortcut_override(app: &App, def: &AliasDef, rest: &str) -> Option<String> {
 }
 
 /// Target resolution via the selected candidate. `Err` carries the message
-/// for the status line (no match / dangling alias name).
-fn selected_target(app: &App) -> Result<(AliasDef, String), String> {
+/// for the status line (no match / dangling alias name). The `bool` is true
+/// when the input came from a history entry, i.e. it already is the decoded
+/// payload rather than fresh typed text or fresh shortcut base64.
+fn selected_target(app: &App) -> Result<(AliasDef, String, bool), String> {
     match state::selected(app) {
         // The shortcut KEY travels on as the input (mirroring
         // `shortcut_override`), so `exec::resolve_shortcuts` maps it and
         // history keeps the replayable shorthand (`br baidu`, not a URL).
         Some(Candidate::Shortcut { alias, key }) => match alias::resolve(&app.aliases, &alias) {
-            Some(def) if def.shortcuts.contains_key(&key) => Ok((def.clone(), key)),
+            Some(def) if def.shortcuts.contains_key(&key) => Ok((def.clone(), key, false)),
             Some(_) => Err(format!("shortcut not found: {key}")),
             None => Err(format!("alias not found: {alias}")),
         },
@@ -118,7 +129,7 @@ fn selected_target(app: &App) -> Result<(AliasDef, String), String> {
             Some(entry) => {
                 let input = entry.input();
                 match alias::resolve(&app.aliases, &entry.alias) {
-                    Some(def) => Ok((def.clone(), input)),
+                    Some(def) => Ok((def.clone(), input, true)),
                     None => Err(format!("alias not found: {}", entry.alias)),
                 }
             }
@@ -126,6 +137,50 @@ fn selected_target(app: &App) -> Result<(AliasDef, String), String> {
         },
         None => Err("no match".to_string()),
     }
+}
+
+/// Draw the run/record split for one execution: what goes to the command
+/// (`payload`) and what enters the history (`record_input`).
+///
+/// `typed` is the input as typed (or the picked shortcut key), `resolved` is
+/// `typed` after [`exec::resolve_shortcuts`]. Non-native aliases are
+/// unchanged: the command sees `resolved`, history keeps `typed`.
+///
+/// Native clipboard aliases read base64 text and put the decoded payload on
+/// the clipboard, so:
+///
+/// * a history replay (`from_history` without a shortcut) carries the
+///   previously recorded payload *verbatim* -- history's base64 decodes to
+///   exactly what was copied -- and must not be decoded a second time;
+/// * a fired shortcut maps to fresh base64, so it *is* decoded like a fresh
+///   run, while history keeps the replayable key;
+/// * a fresh run records the decoded payload (invalid base64, e.g. ordinary
+///   plain text, decodes to itself), so `input_b64` decodes to exactly the
+///   clipboard content.
+fn clipboard_forms(
+    native: bool,
+    from_history: bool,
+    shortcut: bool,
+    typed: &str,
+    resolved: &str,
+) -> (String, String) {
+    if !native {
+        return (resolved.to_string(), typed.to_string());
+    }
+    let decode = !from_history || shortcut;
+    let payload = if decode {
+        storage::decode_b64(resolved)
+    } else {
+        resolved.to_string()
+    };
+    // Shortcuts record `typed` so the shorthand stays replayable; a fresh
+    // direct run records `payload` so `input_b64` decodes to the payload.
+    let recorded = if decode && !from_history && !shortcut {
+        payload.clone()
+    } else {
+        typed.to_string()
+    };
+    (payload, recorded)
 }
 
 fn now_secs() -> u64 {
@@ -422,5 +477,58 @@ mod tests {
         );
         // It is not in the history, so losing the input would lose the run.
         assert_eq!(app.input, "bg", "input kept: {:?}", app.input);
+    }
+
+    #[test]
+    fn clipboard_forms_decodes_fresh_native_input_once() {
+        // Typed base64: the clipboard gets the decoded payload and history
+        // records it, so `input_b64` decodes to exactly the payload.
+        assert_eq!(
+            clipboard_forms(true, false, false, "aGVsbG8=", "aGVsbG8="),
+            ("hello".to_string(), "hello".to_string())
+        );
+        // Invalid base64 (ordinary plain text) falls back to itself.
+        assert_eq!(
+            clipboard_forms(true, false, false, "hello world", "hello world"),
+            ("hello world".to_string(), "hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn clipboard_forms_does_not_decode_a_history_replay_twice() {
+        // A history entry already holds the payload verbatim; decoding a
+        // b64-looking payload again would corrupt the replayed copy.
+        assert_eq!(
+            clipboard_forms(true, true, false, "TWFu", "TWFu"),
+            ("TWFu".to_string(), "TWFu".to_string())
+        );
+    }
+
+    #[test]
+    fn clipboard_forms_decodes_a_fired_shortcut_and_keeps_its_key() {
+        // Shortcut values are fresh base64: decode them, but record the key
+        // so the shorthand stays replayable. Same for a history replay of a
+        // shortcut key.
+        assert_eq!(
+            clipboard_forms(true, false, true, "key", "aGVsbG8="),
+            ("hello".to_string(), "key".to_string())
+        );
+        assert_eq!(
+            clipboard_forms(true, true, true, "key", "aGVsbG8="),
+            ("hello".to_string(), "key".to_string())
+        );
+    }
+
+    #[test]
+    fn clipboard_forms_leaves_non_native_aliases_untouched() {
+        assert_eq!(
+            clipboard_forms(false, false, false, "typ ed", "resolved"),
+            ("resolved".to_string(), "typ ed".to_string())
+        );
+        // Shortcut-resolved values pass through, history keeps the typed key.
+        assert_eq!(
+            clipboard_forms(false, true, true, "baidu", "https://x.dev"),
+            ("https://x.dev".to_string(), "baidu".to_string())
+        );
     }
 }

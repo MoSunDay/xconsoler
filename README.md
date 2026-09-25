@@ -143,8 +143,11 @@ Examples:
 
 The seeded `cd` alias copies through the [`arboard`](https://crates.io/crates/arboard)
 crate directly — no `xclip` / `wl-copy` / `xsel` / `pbcopy` binaries required
-(Linux needs X11 or XWayland). Override it with `:add cd <cmd> // <cmd>` if
-you prefer your own tool.
+(Linux needs X11 or XWayland). Its input is read as base64 and the decoded
+text goes on the clipboard (plain text that is not valid base64 is copied
+verbatim); history still stores inputs base64-encoded, so replaying a recorded
+`cd` copies exactly what was copied the first time. Override it with
+`:add cd <cmd> // <cmd>` if you prefer your own tool.
 
 Placeholders:
 
@@ -317,7 +320,8 @@ Every change is saved to `store.json` immediately.
   without it counts as pre-v2 and gets the seeded defaults merged back in on
   the next load.
 * Inputs are stored as **base64 of the plain text**, so quotes/unicode/newlines
-  round-trip safely and nothing secret-looking is kept in cleartext.
+  round-trip safely and nothing secret-looking is kept in cleartext. For
+  `cd`, that stored base64 decodes to the exact payload the clipboard gets.
 * History: up to **100** entries, newest first, deduplicated per
   `alias + input` (re-running moves the entry to the top). **Failed runs are
   never recorded** — see the placeholder section above.

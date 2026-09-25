@@ -118,6 +118,30 @@ pub fn resolve_shortcuts(def: &AliasDef, rest: &str) -> String {
     }
 }
 
+/// The template `def` runs on `platform`: the platform's own non-blank
+/// command, else the other platform's non-blank command, else `None` (no
+/// command configured at all).
+fn chosen_template(def: &AliasDef, platform: Platform) -> Option<&str> {
+    let (primary, fallback) = match platform {
+        Platform::Linux => (def.linux.as_deref(), def.macos.as_deref()),
+        Platform::Macos => (def.macos.as_deref(), def.linux.as_deref()),
+    };
+    match (primary, fallback) {
+        (Some(t), _) if !t.trim().is_empty() => Some(t),
+        // Single-command aliases (":add t <cmd>", the settings wizard's empty
+        // macos answer) must run on both platforms, not just the one they
+        // were written for.
+        (_, Some(t)) if !t.trim().is_empty() => Some(t),
+        _ => None,
+    }
+}
+
+/// True when `def` dispatches to the native clipboard backend on `platform`
+/// (its chosen template is `@native clipboard`).
+pub fn uses_native_clipboard(def: &AliasDef, platform: Platform) -> bool {
+    chosen_template(def, platform).is_some_and(clipboard::is_native)
+}
+
 /// Run `def` for `input` on `platform`.
 ///
 /// Template handling:
@@ -132,17 +156,9 @@ pub fn resolve_shortcuts(def: &AliasDef, rest: &str) -> String {
 /// stdout is piped and discarded on success so the TUI stays clean; stderr
 /// (tail) and the exit code are reported on failure.
 pub fn run_alias(def: &AliasDef, input: &str, platform: Platform) -> ExecOutcome {
-    let (primary, fallback) = match platform {
-        Platform::Linux => (def.linux.as_deref(), def.macos.as_deref()),
-        Platform::Macos => (def.macos.as_deref(), def.linux.as_deref()),
-    };
-    let template = match (primary, fallback) {
-        (Some(t), _) if !t.trim().is_empty() => t,
-        // Single-command aliases (":add t <cmd>", the settings wizard's empty
-        // macos answer) must run on both platforms, not just the one they
-        // were written for.
-        (_, Some(t)) if !t.trim().is_empty() => t,
-        _ => {
+    let template = match chosen_template(def, platform) {
+        Some(t) => t,
+        None => {
             return ExecOutcome::Failure(format!(
                 "no command configured for {}",
                 platform::name(platform)
@@ -151,7 +167,8 @@ pub fn run_alias(def: &AliasDef, input: &str, platform: Platform) -> ExecOutcome
     };
 
     // Built-in native backends (`@native clipboard`) bypass the shell and
-    // the {input}/@stdin conventions: the raw input is the payload.
+    // the {input}/@stdin conventions: the input here is the decoded payload
+    // (the base64 form is storage/input-side, decoded by `crate::run`).
     if clipboard::is_native(template) {
         return match clipboard::copy(input) {
             Ok(()) => ExecOutcome::Success(format!("{} ok", def.name)),
@@ -277,6 +294,16 @@ mod tests {
         }
     }
 
+    fn def_both(name: &str, linux: Option<&str>, macos: Option<&str>) -> AliasDef {
+        AliasDef {
+            name: name.to_string(),
+            triggers: vec![],
+            linux: linux.map(str::to_string),
+            macos: macos.map(str::to_string),
+            shortcuts: BTreeMap::new(),
+        }
+    }
+
     #[test]
     fn quote_wraps_in_single_quotes() {
         assert_eq!(shell_quote("abc"), "'abc'");
@@ -364,6 +391,31 @@ mod tests {
         // a blank mapping would silently eat the input; treat it as no match
         let d = def_with_shortcuts("t", "printf %s {input}", &[("blank", "   ")]);
         assert_eq!(resolve_shortcuts(&d, "blank tail"), "blank tail");
+    }
+
+    #[test]
+    fn uses_native_clipboard_detects_native_templates_and_fallbacks() {
+        // Both platforms native.
+        let both = def_both("cd", Some(clipboard::TEMPLATE), Some(clipboard::TEMPLATE));
+        assert!(uses_native_clipboard(&both, Platform::Linux));
+        assert!(uses_native_clipboard(&both, Platform::Macos));
+
+        // Linux blank: the linux run falls back to the native macOS command.
+        let fallback = def_both("cd", Some(""), Some(clipboard::TEMPLATE));
+        assert!(uses_native_clipboard(&fallback, Platform::Linux));
+        assert!(uses_native_clipboard(&fallback, Platform::Macos));
+    }
+
+    #[test]
+    fn uses_native_clipboard_is_false_for_shell_and_blank_defs() {
+        let shell = def("br", "xdg-open {input}");
+        assert!(!uses_native_clipboard(&shell, Platform::Linux));
+        // macOS falls back to the shell command, which is not native either.
+        assert!(!uses_native_clipboard(&shell, Platform::Macos));
+
+        let both_blank = def_both("x", Some("   "), None);
+        assert!(!uses_native_clipboard(&both_blank, Platform::Linux));
+        assert!(!uses_native_clipboard(&both_blank, Platform::Macos));
     }
 
     #[test]
