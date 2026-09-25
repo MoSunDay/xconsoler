@@ -9,6 +9,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::alias;
+use crate::exec;
 use crate::matcher::Candidate;
 use crate::render::{clip, main_block, panel_rows, row_rect, segments_line};
 use crate::state::{self, App};
@@ -101,8 +102,8 @@ fn history_segments(app: &App, idx: usize) -> Vec<(String, Style)> {
                 Some(d) => alias::entry_label(d).to_string(),
                 None => entry.alias.clone(),
             };
-            let shown = match def.and_then(|d| shortcut_key(d, &entry.input())) {
-                Some(key) => (key, Style::new().fg(TEXT)),
+            let shown = match def.and_then(|d| exec::shortcut_key(d, &entry.input())) {
+                Some(key) => (key.to_string(), Style::new().fg(TEXT)),
                 None => (REDACTED.to_string(), Style::new().fg(MUTED)),
             };
             vec![
@@ -114,19 +115,6 @@ fn history_segments(app: &App, idx: usize) -> Vec<(String, Style)> {
         }
         None => vec![("…".into(), Style::new().fg(MUTED))],
     }
-}
-
-/// The registered shortcut key `input` names, if any: the same head lookup
-/// [`crate::exec::resolve_shortcuts`] performs, blank mapped values included,
-/// so a key is shown exactly when running the entry would expand that key.
-fn shortcut_key(def: &alias::AliasDef, input: &str) -> Option<String> {
-    let head = input.trim().split(char::is_whitespace).next().unwrap_or("");
-    let named = !head.is_empty()
-        && def
-            .shortcuts
-            .get(head)
-            .is_some_and(|v| !v.trim().is_empty());
-    named.then(|| head.to_string())
 }
 
 /// Shortcut row: the shortcut mark and `alias key`. The registered value is
