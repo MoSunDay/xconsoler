@@ -1,0 +1,80 @@
+#!/bin/sh
+# Install (or remove) a 微信 (web) desktop entry so the `app` alias
+# (`app 微信` / `app wx` / `app wechat`) opens chromium in app mode.
+#
+#   xc-wechat            user install   ($XDG_DATA_HOME or ~/.local/share)
+#   xc-wechat --prefix D explicit prefix (packaging staging dirs)
+#   xc-wechat -u         uninstall what this script installed
+#
+# The template's <browser> placeholder is rewritten to the first detected
+# chromium-based browser (google-chrome, chromium, chromium-browser, snap).
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ASSETS=$ROOT/assets
+PREFIX=${XDG_DATA_HOME:-$HOME/.local/share}
+MODE=install
+
+usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; }
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --prefix)
+            [ $# -ge 2 ] || { echo "xc-wechat: --prefix needs a directory" >&2; exit 2; }
+            PREFIX=$2; shift 2 ;;
+        -u|--uninstall) MODE=uninstall; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "xc-wechat: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+APPS=$PREFIX/applications
+ENTRY=$APPS/wechat-web.desktop
+# The `app` alias scans desktop entries and matches on name, keywords and
+# pinyin initials, so 微信 / wechat / wx all resolve to this file.
+
+# App mode needs a chromium-based binary; snap chromium never is on PATH.
+detect_browser() {
+    for browser in google-chrome chromium chromium-browser; do
+        if command -v "$browser" >/dev/null 2>&1; then
+            command -v "$browser"
+            return 0
+        fi
+    done
+    if [ -x /snap/bin/chromium ]; then
+        echo /snap/bin/chromium
+        return 0
+    fi
+    echo "xc-wechat: no chromium-based browser found (tried google-chrome, chromium, chromium-browser, /snap/bin/chromium)" >&2
+    exit 1
+}
+
+refresh_caches() {
+    command -v update-desktop-database >/dev/null 2>&1 \
+        && update-desktop-database -q "$APPS" || true
+}
+
+install_entry() {
+    mkdir -p "$APPS"
+    BROWSER=$(detect_browser)
+    # The URL is full of slashes, so | is the sed delimiter here.
+    sed "s|^Exec=.*|Exec=$BROWSER --app=https://wx.qq.com/|" \
+        "$ASSETS/wechat-web.desktop" > "$ENTRY"
+    chmod 0644 "$ENTRY"
+}
+
+uninstall_entry() {
+    rm -f "$ENTRY"
+}
+
+if [ "$MODE" = uninstall ]; then
+    uninstall_entry
+    refresh_caches
+    echo "xc-wechat: removed 微信 (web) menu entry under $PREFIX"
+else
+    install_entry
+    refresh_caches
+    echo "xc-wechat: installed $ENTRY (chromium app mode)"
+    echo "         browser: $BROWSER"
+    echo "         app 微信 / app wx / app wechat now reach it"
+fi
