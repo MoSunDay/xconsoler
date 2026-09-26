@@ -7,17 +7,19 @@ records live in `features/` and are appended below when a task closes.
 
 Rust TUI keyboard launcher (ratatui + crossterm): a summoned bar where an
 alias + input runs a mapped command; working runs enter history. Store is
-`store.json` (schema v3, seeds `br` / `cd` / `app`).
+`store.json` (schema v5, seeds `br` / `cd` / `app`).
 
 ## Module map
 
 - `src/run.rs` — input → alias dispatch; `src/exec.rs` — template expansion,
   `{input}` / `@stdin`, native-backend dispatch
 - `src/launch.rs` + `src/launch/` — `@native app`: desktop-entry scan and
-  name matching (names, keywords, exec basename, pinyin initials)
+  name matching (names, keywords, exec basename, pinyin initials); a `://`
+  input matching no entry opens in the default browser (`open`/`xdg-open`)
 - `src/alias.rs`, `src/storage/` — alias defs and the store
 - `src/cli.rs` — headless flags (`--print-app`, `--print-rows`, `--print-bind`)
-- `scripts/xc-{bar,key,icon,deploy}` — runtime/deploy helpers
+- `scripts/xc-{bar,key,icon,wechat,deploy}` — runtime/deploy helpers
+  (`xc-wechat` installs the `assets/wechat-web.desktop` template)
 
 ## Conventions
 
