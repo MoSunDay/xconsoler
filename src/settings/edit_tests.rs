@@ -15,6 +15,10 @@ fn ctrl(c: char) -> KeyEvent {
 
 fn store_with_t() -> Store {
     let mut store = Store::default();
+    // The schema-v6 `pw` seed is dropped so `t` keeps its fixed index 3 in
+    // this suite's cursor arithmetic; the seed inventory itself is covered
+    // by alias::tests and storage::tests.
+    store.aliases.retain(|d| d.name != "pw");
     store.aliases.push(crate::alias::AliasDef {
         name: "t".to_string(),
         triggers: vec!["tt".to_string()],

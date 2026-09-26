@@ -48,7 +48,7 @@ fn default_store_is_seeded_with_the_defaults() {
 /// the fresh seed saves at the current schema version with every value
 /// base64-encoded, and reloads as the same plaintext map.
 #[test]
-fn seeded_store_saves_at_version_5_with_encoded_shortcuts() {
+fn seeded_store_saves_at_the_current_schema_version_with_encoded_shortcuts() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.json");
     save(&path, &Store::default()).unwrap();

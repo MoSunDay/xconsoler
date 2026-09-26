@@ -36,6 +36,9 @@ OPTIONS:
     --print-app <name>    resolve <name> against the installed applications and
                           print the match (label, source, exec), exit; nothing
                           is launched and no TUI starts
+    --print-pass <spec>   print one generated password for the `pw` plugin and
+                          exit; spec = [simple|medium|complex] [length]
+                          (default: complex, 32) e.g. --print-pass \"medium 16\"
     --shell <bash|zsh>    shell flavour for --print-bind (default: bash)
     --store <path>        store.json location (default: $HOME/xconsoler/store.json)
     -h, --help            show this help";
@@ -52,6 +55,7 @@ pub struct Cli {
     pub print_bind: bool,
     pub print_rows: bool,
     pub print_app: Option<String>,
+    pub print_pass: Option<String>,
     pub shell: String,
 }
 
@@ -67,6 +71,7 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
         print_bind: false,
         print_rows: false,
         print_app: None,
+        print_pass: None,
         shell: "bash".to_string(),
     };
     let mut i = 1;
@@ -85,6 +90,21 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
             "--print-bind" => cli.print_bind = true,
             "--print-rows" => cli.print_rows = true,
             "--print-app" => cli.print_app = Some(next_value(args, &mut i, "--print-app")?),
+            // The spec is optional end to end: a bare `--print-pass` (the
+            // flag last on the line, or followed by another flag) carries
+            // the empty spec, which is the default complex/32 - same as
+            // `--print-pass ""`. No valid spec starts with `--`, so the
+            // next argv token is never eaten as one.
+            "--print-pass" => {
+                let spec = match args.get(i + 1) {
+                    Some(spec) if !spec.starts_with("--") => {
+                        i += 1;
+                        spec.clone()
+                    }
+                    _ => String::new(),
+                };
+                cli.print_pass = Some(spec);
+            }
             "--shell" => {
                 let shell = next_value(args, &mut i, "--shell")?;
                 if shell != "bash" && shell != "zsh" {
@@ -191,6 +211,29 @@ pub fn run_print_app(name: &str) -> ! {
         }
         launch::Match::None => {
             eprintln!("xconsoler: no app matches: {name}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// `--print-pass`: generate one password for the `pw` plugin's spec and
+/// print it (nothing is copied, no store is read, no TUI starts). A bad
+/// spec exits 2 with the usage hint so scripts can branch.
+pub fn run_print_pass(spec: &str) -> ! {
+    let req = match xconsoler::plugins::pw::parse(spec) {
+        Ok(req) => req,
+        Err(e) => {
+            eprintln!("xconsoler: {e}");
+            std::process::exit(2);
+        }
+    };
+    match xconsoler::plugins::pw::generate(&req) {
+        Ok(password) => {
+            println!("{password}");
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("xconsoler: {e}");
             std::process::exit(2);
         }
     }
@@ -318,8 +361,49 @@ mod tests {
         assert!(cli.print_bind);
         assert!(cli.print_rows);
         assert_eq!(cli.print_app.as_deref(), Some("wechat"));
+        assert_eq!(cli.print_pass, None);
         assert_eq!(cli.shell, "zsh");
         assert_eq!(cli.store, PathBuf::from("/tmp/s.json"));
+    }
+
+    #[test]
+    fn parse_args_print_pass_captures_the_whole_spec() {
+        // One argv value: quote the spec in the shell, not in the parser.
+        let cli = parse_args(&args(&["--print-pass", "medium 16"])).unwrap();
+        assert_eq!(cli.print_pass.as_deref(), Some("medium 16"));
+        let cli = parse_args(&args(&["--print-pass", "simple"])).unwrap();
+        assert_eq!(cli.print_pass.as_deref(), Some("simple"));
+        // A bare flag carries the empty spec: the default profile, not an
+        // error (an unknown word inside a given spec still fails later,
+        // in `run_print_pass`).
+        let cli = parse_args(&args(&["--print-pass"])).unwrap();
+        assert_eq!(cli.print_pass.as_deref(), Some(""));
+        assert_eq!(
+            xconsoler::plugins::pw::parse(cli.print_pass.as_deref().unwrap()),
+            Ok(xconsoler::plugins::pw::Request {
+                profile: xconsoler::plugins::pw::COMPLEX,
+                len: 32
+            })
+        );
+    }
+
+    #[test]
+    fn parse_args_print_pass_does_not_eat_a_following_flag() {
+        // A `--`-prefixed argv token is another flag, not a spec: the pw
+        // arm leaves it for its own parser arm (P2-1 regression guard).
+        let cli = parse_args(&args(&["--print-pass", "--summon"])).unwrap();
+        assert_eq!(cli.print_pass.as_deref(), Some(""));
+        assert!(cli.summon);
+
+        let cli = parse_args(&args(&["--summon", "--print-pass", "--shell", "zsh"])).unwrap();
+        assert!(cli.summon);
+        assert_eq!(cli.print_pass.as_deref(), Some(""));
+        assert_eq!(cli.shell, "zsh");
+
+        // Single-dash tokens are still consumed as the spec itself and
+        // rejected later by the pw parser (unknown spec), not by the CLI.
+        let cli = parse_args(&args(&["--print-pass", "-5"])).unwrap();
+        assert_eq!(cli.print_pass.as_deref(), Some("-5"));
     }
 
     #[test]
