@@ -83,8 +83,10 @@ pub fn ranked_candidates(
 /// The target text a candidate would run: a history entry resolves its
 /// recorded shorthand through the alias's shortcuts (exactly what a replay
 /// executes - `br baidu` and a raw `br https://…` are the same target), a
-/// shortcut row carries its expansion directly. `None` when the row cannot be
-/// evaluated (dangling alias name): such rows dedup against nothing.
+/// shortcut row carries its expansion directly. `None` only for a shortcut
+/// row whose alias (or key) is gone; a history row with a dangling alias
+/// still yields its raw input, so identical inputs keep deduplicating.
+/// `None` rows dedup against nothing.
 fn value_of(store: &Store, aliases: &[AliasDef], cand: &Candidate) -> Option<String> {
     match cand {
         Candidate::History { idx } => {
