@@ -29,4 +29,4 @@ alias + input runs a mapped command; working runs enter history. Store is
 ## Task memory index
 
 - `features/app-chrome-wechat.md` — wiring the `app` alias to Chrome WeChat
-  (plan + verified state, closed 2026-09-26)
+  (blueprint applied 2026-09-26: `xc-wechat` entry + linux URL passthrough)
