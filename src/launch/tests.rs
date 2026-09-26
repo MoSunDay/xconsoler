@@ -166,23 +166,60 @@ fn macos_commands_open_the_bundle_or_url() {
 }
 
 #[test]
-fn macos_url_fallback_passes_urls_through_and_nothing_else() {
+fn url_fallback_passes_urls_through_on_both_platforms() {
     let url = "https://x.example/page";
+    for platform in [Platform::Macos, Platform::Linux] {
+        assert_eq!(
+            url_fallback(url, platform, Match::None),
+            Match::One(Resolved {
+                label: url.to_string(),
+                source: url.to_string(),
+                exec: None,
+            }),
+            "{platform:?} passes URLs through"
+        );
+        assert_eq!(
+            url_fallback("zzz", platform, Match::None),
+            Match::None,
+            "{platform:?} keeps non-URLs unresolved"
+        );
+    }
+    // A URL with a real match behind it stays that match: the passthrough
+    // is a fallback, not an override.
+    let existing = resolve_from(&[wechat()], "wechat");
+    assert!(matches!(&existing, Match::One(target) if target.label == "WeChat"));
     assert_eq!(
-        url_fallback(url, Platform::Macos, Match::None),
-        Match::One(Resolved {
-            label: url.to_string(),
-            source: url.to_string(),
-            exec: None,
-        })
+        url_fallback(url, Platform::Linux, existing.clone()),
+        existing
     );
+}
+
+#[test]
+fn url_targets_open_with_xdg_open_then_gio() {
+    let target = Resolved {
+        label: "https://wx.qq.com".to_string(),
+        source: "https://wx.qq.com".to_string(),
+        exec: None,
+    };
+    assert!(is_url(&target), "a URL-sourced target is a URL target");
+    let entry_target = Resolved {
+        label: "WeChat".to_string(),
+        source: "/usr/share/applications/wechat.desktop".to_string(),
+        exec: None,
+    };
+    assert!(!is_url(&entry_target), "a desktop file is not a URL");
+
+    assert_eq!(URL_OPENERS, ["xdg-open", "gio"], "xdg-open is preferred");
+    let xdg = url_command(&target, "xdg-open");
+    assert_eq!(xdg.get_program(), "xdg-open");
     assert_eq!(
-        url_fallback("zzz", Platform::Macos, Match::None),
-        Match::None
+        xdg.get_args().collect::<Vec<_>>(),
+        vec!["https://wx.qq.com"]
     );
+    let gio = url_command(&target, "gio");
+    assert_eq!(gio.get_program(), "gio");
     assert_eq!(
-        url_fallback(url, Platform::Linux, Match::None),
-        Match::None,
-        "linux has no URL fallback"
+        gio.get_args().collect::<Vec<_>>(),
+        vec!["open", "https://wx.qq.com"]
     );
 }
