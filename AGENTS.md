@@ -19,6 +19,8 @@ alias + input runs a mapped command; working runs enter history. Store is
 - `src/alias.rs`, `src/storage/` — alias defs and the store
 - `src/plugins/` — home for built-in `@native` mini-tools (`mod.rs` registry); `pw` = password generator (simple/medium/complex profiles)
 - `src/cli.rs` — headless flags (`--print-app`, `--print-pass`, `--print-rows`, `--print-bind`)
+- `scripts/xc-{bar,key,icon,wechat,deploy}` — runtime/deploy helpers
+  (`xc-wechat` installs the `assets/wechat-web.desktop` template)
 
 ## Conventions
 
@@ -27,3 +29,9 @@ alias + input runs a mapped command; working runs enter history. Store is
 - Tests are colocated (`src/**/tests.rs`, `*_tests.rs`) and environment-independent
 - `.probe/` is scratch space (gitignored)
 
+## Task memory index
+
+- `features/app-chrome-wechat.md` — wiring the `app` alias to Chrome WeChat
+  (blueprint applied 2026-09-26: `xc-wechat` entry + linux URL passthrough)
+- `features/pw-plugin.md` — built-in `pw` password generator: `src/plugins/`
+  home, store v6 seed, `--print-pass` (shipped 2026-09-26 as `ae7c14c`)
