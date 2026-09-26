@@ -1,14 +1,20 @@
-//! Window auto-fit: the bar's frame is sized once per session and then stays
-//! put - the height carries the stored history (what the empty bar lists) and
-//! is never smaller than the typed candidate set, so typing a query only
-//! changes the list's *contents*, never the window around it. The command
-//! palette keeps one fixed height for its whole open session (its fuzzy
-//! filter must not resize the frame per keystroke); only `/settings`, a full
-//! page rather than a bar, asks for a different window.
+//! Window auto-fit: the bar's height follows the candidate list it is
+//! drawing - one row per visible candidate plus the 3-row input box, the
+//! 2-row list frame and the status row - so an empty list leaves the bare
+//! box and a full recent list tops out at `state::MAX_BAR_ROWS`. The input
+//! box never moves: it owns the top rows, and only the list (and the window
+//! under it) grows or shrinks. Height changes are coalesced through a
+//! settle window ([`SETTLE`]): typing reshuffles the candidate count on
+//! every keystroke, and a resize per key would bounce the frame under the
+//! user's fingers, so a new height is only asked for once it has stayed
+//! wanted past the settle. The command palette keeps one fixed height for
+//! its whole open session (its fuzzy filter must not resize the frame per
+//! keystroke); only `/settings`, a full page rather than a bar, asks for a
+//! different window.
 //!
 //! `scripts/xc-bar` picks the *launch* geometry with the same rule (see
-//! `--print-rows`), so the first frame already has the session height; this
-//! module pins it there afterwards.
+//! `--print-rows`), so the first frame already has the height its empty bar
+//! wants; the fit then adapts the window as the list changes.
 //! Two mechanisms, both best effort, and a retry policy ([`may_ask`]) that
 //! covers a window which is still being mapped or focused - where the first
 //! request goes nowhere - without asking a terminal that ignores the request
@@ -59,30 +65,39 @@ pub const MAX_ASKS: u8 = 8;
 /// fixed comfortable height instead of one derived from a candidate count.
 pub const SETTINGS_ROWS: u16 = 24;
 
-/// Rows the normal bar keeps for the whole session: room for the stored
-/// history an empty bar lists, and never less than the typed candidate set,
-/// so neither typing nor replaying changes the frame's height.
-pub fn stable_rows(app: &App) -> u16 {
-    state::bar_rows(app.store.history.len().max(state::CANDIDATE_LIMIT))
-}
+/// How long a newly wanted height must stay wanted before the fit asks for
+/// it: the candidate count changes on every keystroke, and a resize per key
+/// would bounce the window (and redraw the whole frame) under the user's
+/// fingers. Only the session's opening height skips the wait - the launch
+/// geometry already aims there.
+pub const SETTLE: Duration = Duration::from_millis(400);
 
-/// Rows the window should have for `app` right now.
-///
-/// The launcher reuses [`state::bar_rows`] - box, list frame, one row per
-/// entry, status row, capped by `state::MAX_BAR_ROWS` - so the summoned
-/// height and the fitted height can never disagree about the geometry.
-/// Normal and hidden modes keep the session's [`stable_rows`]; the palette
-/// keeps one fixed height of its own, because its fuzzy filter changes the
-/// visible rows, not the window, and `/settings` is the one page that asks
-/// for its full height.
-pub fn desired_rows(app: &App, stable: u16) -> u16 {
+/// Rows the window wants for `app` right now: the bar follows its candidate
+/// list ([`state::bar_rows`] - the 3-row input box, the 2-row list frame,
+/// one row per visible candidate, the status row), so an empty list leaves
+/// the bare box and a full recent list tops out at `state::MAX_BAR_ROWS`.
+/// The palette keeps one fixed height for its whole open session (its fuzzy
+/// filter changes the visible rows, not the window) and `/settings` is the
+/// one page that asks for its full height. The *asking* is coalesced by
+/// [`SETTLE`] in the event loop: the want changes here, the request waits
+/// for the list to settle.
+pub fn desired_rows(app: &App) -> u16 {
     if matches!(app.mode, Mode::Settings(_)) {
         return SETTINGS_ROWS;
     }
     if app.palette.is_some() {
-        return stable.max(state::bar_rows(commands::len()));
+        return state::bar_rows(commands::len());
     }
-    stable
+    state::bar_rows(state::candidates(app).len())
+}
+
+/// Whether a wanted height may be asked for yet: `opening` marks the
+/// session's first height (asked straight away - the launch geometry
+/// already aims there), any later change must have been wanted for `since`
+/// to beat the settle window, so a typing burst coalesces into one resize.
+/// Pure; the caller owns the clock.
+pub fn may_switch(since: Duration, opening: bool) -> bool {
+    opening || since >= SETTLE
 }
 
 /// Whether the fit may ask for its height again: `tries` asks went out, the
@@ -216,58 +231,54 @@ mod tests {
     }
 
     #[test]
-    fn stable_rows_keeps_room_for_history_and_typed_candidates() {
-        // Room for CANDIDATE_LIMIT typed candidates even with no history...
-        assert_eq!(
-            stable_rows(&app(0)),
-            state::bar_rows(state::CANDIDATE_LIMIT)
-        );
-        assert_eq!(
-            stable_rows(&app(3)),
-            state::bar_rows(state::CANDIDATE_LIMIT)
-        );
-        // ...and for the stored history once it is the larger side.
-        assert_eq!(stable_rows(&app(6)), state::bar_rows(6));
-        assert_eq!(stable_rows(&app(10)), state::MAX_BAR_ROWS);
-        // The launch geometry (`--print-rows`) uses the same rule, so the
-        // first frame already has this height.
-    }
-
-    #[test]
-    fn desired_rows_ignores_the_live_candidates() {
+    fn desired_rows_follows_the_list_being_shown() {
         let mut a = app(1); // history: `br baidu 0`
-        let stable = stable_rows(&a);
+                            // Empty input: the recent list is the one recorded entry.
+        assert_eq!(desired_rows(&a), state::bar_rows(1));
         a.input = "br b".to_string();
         // History first, then the alias's `baidu`/`bing` rows.
         assert_eq!(state::candidates(&a).len(), 3);
-        assert_eq!(desired_rows(&a, stable), stable);
+        assert_eq!(desired_rows(&a), state::bar_rows(3));
         a.input = "zzz".to_string();
+        // No matches: the bare box plus the status row.
         assert_eq!(state::candidates(&a).len(), 0);
-        assert_eq!(desired_rows(&a, stable), stable, "no matches: same frame");
+        assert_eq!(desired_rows(&a), state::bar_rows(0));
     }
 
     #[test]
     fn palette_height_is_fixed_and_settings_gets_its_page() {
         let mut a = app(0);
-        let stable = stable_rows(&a);
         a.palette = Some(0);
-        let palette = desired_rows(&a, stable);
-        assert_eq!(palette, stable.max(state::bar_rows(commands::len())));
+        let palette = desired_rows(&a);
+        assert_eq!(palette, state::bar_rows(commands::len()));
         // The fuzzy filter shrinks the visible rows, never the window.
         a.input = "/zz".to_string();
-        assert_eq!(desired_rows(&a, stable), palette);
+        assert_eq!(desired_rows(&a), palette);
         a.palette = None;
-        assert_eq!(desired_rows(&a, stable), stable);
+        a.input.clear();
+        assert_eq!(desired_rows(&a), state::bar_rows(0));
         a.mode = Mode::Settings(Box::new(crate::settings::new()));
-        assert_eq!(desired_rows(&a, stable), SETTINGS_ROWS);
+        assert_eq!(desired_rows(&a), SETTINGS_ROWS);
     }
 
     #[test]
-    fn hidden_bar_keeps_the_session_height() {
+    fn switches_wait_out_the_settle_window() {
+        // The opening height goes out at once; a later change must persist.
+        assert!(may_switch(Duration::ZERO, true));
+        assert!(!may_switch(Duration::ZERO, false));
+        assert!(!may_switch(SETTLE - Duration::from_millis(1), false));
+        assert!(may_switch(SETTLE, false));
+    }
+
+    #[test]
+    fn hidden_bar_keeps_the_list_height() {
         let mut a = app(3);
-        let stable = stable_rows(&a);
+        let shown = desired_rows(&a);
         a.visibility = Visibility::Hidden;
-        assert_eq!(desired_rows(&a, stable), stable);
+        // Hiding swaps the frame for a one-liner, not the fit: the window
+        // still wants the height of the list it would draw.
+        assert_eq!(desired_rows(&a), shown);
+        assert_eq!(shown, state::bar_rows(3));
     }
 
     #[test]

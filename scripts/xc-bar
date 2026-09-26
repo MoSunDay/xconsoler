@@ -27,16 +27,17 @@
 # as "XConsoler", the WM_CLASS this script hands the terminal below.
 set -u
 # --- height -------------------------------------------------------------
-# The bar is sized once and keeps that height for the session, so typing a
-# query only changes the candidate list's contents. The height carries the
-# store's recent history (3-row input box + 2-row list frame/title + 1-row
-# status line + one row per entry, 6 + 10 = 16 at most via
-# `state::MAX_BAR_ROWS`/`state::RECENT_LIMIT`) and is never less than room
-# for the typed candidate set (5 entries -> 11 rows). The number comes from
+# The bar's height follows its candidate list: one row per visible entry on
+# top of the fixed chrome (3-row input box + 2-row list frame/title + 1-row
+# status line, 6 + 10 = 16 at most via `state::MAX_BAR_ROWS`/
+# `state::RECENT_LIMIT`). This script only picks the *launch* geometry - the
+# height the empty bar's recent list wants; the TUI then adapts (with a
+# settle delay, so typing cannot bounce the window). The number comes from
 # the launcher itself (`--print-rows`) with python3 as the fallback; a store
 # that cannot be read -- corrupt ones count as no history, the launcher
-# starts empty from them -- never grows past the cap. XC_ROWS pins a fixed
-# height; XC_PRINT_ROWS prints the computed one and exits (used by tests).
+# starts empty from them -- lands on the bare 4-row box. XC_ROWS pins a
+# fixed height; XC_PRINT_ROWS prints the computed one and exits (used by
+# tests).
 #
 # Resolve the binary up front: gnome-terminal-server can run with a stripped
 # environment (no PATH), where a bare `xconsoler` would not be found. A dev
@@ -56,7 +57,8 @@ fi
 STORE_FILE=${HOME:-.}/xconsoler/store.json
 # One exec of the launcher itself beats python3 (~30ms saved on every
 # hotkey press); python3 stays as the fallback, where a missing/corrupt
-# store means the old 16-row default.
+# store counts as no history (4-row bare box). 16 shows up only when
+# python3 itself is unavailable.
 HIST_ROWS=$("$XC_BIN" --print-rows --store "$STORE_FILE" 2>/dev/null || true)
 case "$HIST_ROWS" in
     '' | *[!0-9]*)
@@ -68,8 +70,8 @@ try:
     history = json.load(open(sys.argv[1])).get("history") or []
 except Exception:
     history = []
-visible = max(len(history), 5)  # 5 = state::CANDIDATE_LIMIT (typed candidates)
-print(min(6 + min(visible, 10), 16))  # 16 = state::MAX_BAR_ROWS (6 + RECENT_LIMIT)
+visible = len(history)
+print(4 if visible == 0 else min(6 + min(visible, 10), 16))  # = state::bar_rows (4 = bare box)
 PY
 )
         fi ;;

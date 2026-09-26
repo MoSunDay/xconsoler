@@ -322,7 +322,10 @@ mod tests {
             Some(INPUT_BOX_H as usize + 1),
             "first list row under the box: {text}"
         );
-        assert!(text.contains("↳ br baidu ·"), "shortcut row: {text}");
+        // Shortcut rows stop at the registered shorthand: the value is
+        // known to whoever registered it, and URLs only eat width.
+        assert!(text.contains("↳ br baidu"), "shortcut row: {text}");
+        assert!(!text.contains("https://"), "no values in list rows: {text}");
         assert!(
             text.contains("matches · 1 history · 2 shortcut"),
             "list title: {text}"

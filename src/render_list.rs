@@ -12,7 +12,7 @@ use crate::alias;
 use crate::matcher::Candidate;
 use crate::render::{clip, main_block, panel_rows, row_rect, segments_line};
 use crate::state::{self, App};
-use crate::theme::{ACCENT, MUTED, SELECT_BG, SUBTLE, TEXT};
+use crate::theme::{ACCENT, MUTED, SELECT_BG, TEXT};
 
 /// Candidate list under the input box (hidden while the palette is open): one
 /// row per ranked candidate, Up/Down to move the highlight, Enter to run it.
@@ -51,7 +51,7 @@ pub(crate) fn draw_candidates(f: &mut Frame, app: &App, width: u16, y: u16) -> u
         .map(|(i, cand)| {
             let segs = match cand {
                 Candidate::History { idx } => history_segments(app, *idx),
-                Candidate::Shortcut { alias, key } => shortcut_row_segments(app, alias, key),
+                Candidate::Shortcut { alias, key } => shortcut_row_segments(alias, key),
             };
             segments_line(segs, inner_width as usize, i + start == cursor, sel_style)
         })
@@ -103,16 +103,14 @@ fn history_segments(app: &App, idx: usize) -> Vec<(String, Style)> {
     }
 }
 
-/// Shortcut row: the shortcut mark, `alias key` and the registered value.
-fn shortcut_row_segments(app: &App, alias: &str, key: &str) -> Vec<(String, Style)> {
-    let value = alias::resolve(&app.aliases, alias)
-        .and_then(|d| d.shortcuts.get(key).cloned())
-        .unwrap_or_else(|| "…".to_string());
+/// Shortcut row: the shortcut mark and `alias key` - and nothing else. The
+/// registered value is deliberately not drawn: the key is the shorthand
+/// the user chose, and restating what it maps to (URLs and paths run long)
+/// only spends the row's width on something already known.
+fn shortcut_row_segments(alias: &str, key: &str) -> Vec<(String, Style)> {
     vec![
         ("↳ ".into(), Style::new().fg(MUTED)),
         (format!("{alias} {key}"), Style::new().fg(ACCENT)),
-        (" · ".into(), Style::new().fg(SUBTLE)),
-        (value, Style::new().fg(SUBTLE)),
     ]
 }
 

@@ -150,14 +150,13 @@ pub fn run_set_command_key(path: &Path, spec: &str) -> ! {
 
 /// `--print-rows`: desktop bar height for the stored history, one integer.
 ///
-/// Same rule as [`fit::stable_rows`]: room for the history an empty bar
-/// lists and never less than the typed candidate set, so the launch geometry
-/// is also the height the bar keeps for the session. Fully headless; always
+/// Same rule as [`fit::desired_rows`] on the opening frame: one row per
+/// recent entry the empty bar lists ([`state::bar_rows`]), so the launch
+/// geometry is the height the bar first wants. Fully headless; always
 /// exits.
 pub fn run_print_rows(path: &Path) -> ! {
     let store = storage::load(path);
-    let visible = store.history.len().max(state::CANDIDATE_LIMIT);
-    println!("{}", state::bar_rows(visible));
+    println!("{}", state::bar_rows(store.history.len()));
     std::process::exit(0);
 }
 
