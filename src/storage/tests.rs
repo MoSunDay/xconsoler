@@ -44,6 +44,46 @@ fn default_store_is_seeded_with_the_defaults() {
     assert_eq!(store.version, SCHEMA_VERSION);
 }
 
+/// Seeded shortcuts stay plaintext in memory and hit the disk encoded:
+/// the fresh seed saves at the current schema version with every value
+/// base64-encoded, and reloads as the same plaintext map.
+#[test]
+fn seeded_store_saves_at_version_5_with_encoded_shortcuts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+    save(&path, &Store::default()).unwrap();
+
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(json["version"], serde_json::json!(SCHEMA_VERSION));
+    let br = json["aliases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "br")
+        .unwrap();
+    assert_eq!(
+        br["shortcuts"],
+        serde_json::json!({
+            "baidu": encode_b64("https://www.baidu.com"),
+            "gm": encode_b64("https://mail.google.com")
+        })
+    );
+    assert!(!json.to_string().contains("www.baidu.com"));
+
+    let reloaded = load(&path);
+    assert_eq!(
+        reloaded
+            .aliases
+            .iter()
+            .find(|d| d.name == "br")
+            .unwrap()
+            .shortcuts["baidu"],
+        "https://www.baidu.com",
+        "the encoded seed reloads as plaintext"
+    );
+}
+
 #[test]
 fn save_load_roundtrip() {
     let dir = tempfile::tempdir().unwrap();

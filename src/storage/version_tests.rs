@@ -28,13 +28,101 @@ fn legacy_store_json_loads_and_saves_with_the_new_keys() {
     save(&path, &store).unwrap();
     let json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(json["version"], serde_json::json!(4));
+    assert_eq!(json["version"], serde_json::json!(SCHEMA_VERSION));
     let aliases = json["aliases"].as_array().unwrap();
     let mine = aliases.iter().find(|d| d["name"] == "mine").unwrap();
     assert_eq!(mine["triggers"], serde_json::json!(["tt", "tw"]));
-    assert_eq!(mine["shortcuts"], serde_json::json!({ "here": "cd /tmp" }));
+    assert_eq!(
+        mine["shortcuts"],
+        serde_json::json!({ "here": encode_b64("cd /tmp") }),
+        "the value is rewritten base64-encoded (schema v5)"
+    );
     assert!(mine["shortcuts"].is_object(), "the legacy array is gone");
     assert!(mine.get("args").is_none(), "the legacy map key is gone");
+}
+
+/// A v4 file stores shortcut values as plaintext: they load exactly as
+/// written, and the next save rewrites the file at version 5 with every
+/// value base64-encoded. Re-loading that file restores the plaintext.
+#[test]
+fn v4_plaintext_shortcuts_resave_as_base64_at_version_5() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+    fs::write(
+        &path,
+        r#"{"version":4,"aliases":[{"name":"br","triggers":["b"],
+            "linux":"xdg-open {input}","macos":null,
+            "shortcuts":{"zhipu":"https://bigmodel.cn/console/overview"}}],
+            "history":[]}"#,
+    )
+    .unwrap();
+
+    let store = load(&path);
+    assert_eq!(store.version, SCHEMA_VERSION);
+    assert_eq!(
+        store.aliases[0].shortcuts["zhipu"], "https://bigmodel.cn/console/overview",
+        "a v4 value loads as the plaintext it was written as"
+    );
+
+    save(&path, &store).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(json["version"], serde_json::json!(5));
+    assert_eq!(
+        json["aliases"][0]["shortcuts"]["zhipu"],
+        serde_json::json!(encode_b64("https://bigmodel.cn/console/overview")),
+        "the value is stored base64-encoded"
+    );
+    assert!(!json.to_string().contains("bigmodel.cn"));
+
+    let reloaded = load(&path);
+    assert_eq!(
+        reloaded.aliases[0].shortcuts["zhipu"], "https://bigmodel.cn/console/overview",
+        "the round trip restores the original plaintext"
+    );
+}
+
+/// v5 files store base64 values, which decode on load; a value that is not
+/// valid base64 (a hand-edited plaintext entry) falls back to the raw
+/// string, and a save/load round trip keeps every value stable.
+#[test]
+fn v5_shortcut_values_decode_with_raw_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+    let v5 = serde_json::json!({
+        "version": 5,
+        "aliases": [{
+            "name": "br",
+            "triggers": [],
+            "linux": "xdg-open {input}",
+            "macos": null,
+            "shortcuts": {
+                "baidu": encode_b64("https://www.baidu.com"),
+                "hand": "https://plain.example/not-base64"
+            }
+        }],
+        "history": []
+    });
+    fs::write(&path, v5.to_string()).unwrap();
+
+    let store = load(&path);
+    assert_eq!(store.version, SCHEMA_VERSION);
+    let br = &store.aliases[0];
+    assert_eq!(
+        br.shortcuts["baidu"], "https://www.baidu.com",
+        "a base64 value decodes on load"
+    );
+    assert_eq!(
+        br.shortcuts["hand"], "https://plain.example/not-base64",
+        "a non-base64 value loads verbatim"
+    );
+
+    save(&path, &store).unwrap();
+    assert_eq!(
+        load(&path).aliases[0].shortcuts,
+        br.shortcuts,
+        "the decoded values survive a save/load round trip"
+    );
 }
 
 /// Every hand-written shape loads: the current `"triggers"` array plus

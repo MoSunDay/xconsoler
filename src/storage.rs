@@ -1,5 +1,6 @@
 //! Persistent store: user aliases and history entries (JSON on disk).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,15 +19,24 @@ pub const MAX_HISTORY: usize = 100;
 
 /// Current on-disk schema version.
 ///
-/// Version 4 seeded the `app` alias (native application launcher), which
-/// older snapshots get appended by [`migrate`]. Version 3 renamed the alias
-/// JSON keys to the UI vocabulary (`"triggers"` for the trigger words,
-/// `"shortcuts"` for the key → value map); the manual `AliasDef`
-/// deserializer normalizes legacy keys while loading. Version 2 was the
-/// first full snapshot: stores older than 2 carry *overrides* of the seeded
-/// defaults only, so [`load`] merges the defaults back in for them; any
-/// store older than this constant is bumped to it.
-pub const SCHEMA_VERSION: u32 = 4;
+/// Version 5 base64-encodes every `"shortcuts"` value on disk (values can
+/// carry tokens, URLs and paths), mirroring the `input_b64` history field;
+/// [`load`] decodes them again, and older stores keep their plaintext
+/// values until the next save encodes them. Version 4 seeded the `app`
+/// alias (native application launcher), which older snapshots get appended
+/// by [`migrate`]. Version 3 renamed the alias JSON keys to the UI
+/// vocabulary (`"triggers"` for the trigger words, `"shortcuts"` for the
+/// key → value map); the manual `AliasDef` deserializer normalizes legacy
+/// keys while loading. Version 2 was the first full snapshot: stores older
+/// than 2 carry *overrides* of the seeded defaults only, so [`load`] merges
+/// the defaults back in for them; any store older than this constant is
+/// bumped to it.
+pub const SCHEMA_VERSION: u32 = 5;
+
+/// First schema version whose files carry base64-encoded shortcut values;
+/// stores at or above it are decoded on load (see [`accept`]). Kept apart
+/// from [`SCHEMA_VERSION`] so later bumps still gate on the right version.
+const SHORTCUTS_B64_VERSION: u32 = 5;
 
 /// One recorded execution. The input is stored base64-encoded so arbitrary
 /// text (quotes, newlines, unicode) survives the JSON roundtrip untouched.
@@ -258,8 +268,10 @@ fn read_fallback(path: &Path, legacy: Option<&Path>) -> Store {
 /// of the seeded defaults, so the defaults are merged back in first; version 4
 /// seeded a new `app` alias, so older snapshots get it appended unless they
 /// already define that name; every older version is then bumped to
-/// [`SCHEMA_VERSION`]. The alias deserializer has already normalized legacy
-/// field names in memory.
+/// [`SCHEMA_VERSION`]. Version 5 needs no in-memory transform here: shortcut
+/// values are plaintext in memory at every version, and only the on-disk
+/// encoding changed, which [`save`] applies. The alias deserializer has
+/// already normalized legacy field names in memory.
 fn migrate(store: &mut Store) {
     if store.version < 2 {
         store.aliases = merge_defaults(std::mem::take(&mut store.aliases));
@@ -283,18 +295,36 @@ fn append_default_alias(aliases: &mut Vec<AliasDef>, def: AliasDef) {
     }
 }
 
-/// Finish a parsed store: older versions are migrated (seeded defaults come
-/// first, same-name stored aliases replace them in place, and any other
-/// stored names are appended) and history is trimmed. A store from a newer
-/// build is returned verbatim and marked read-only.
+/// Finish a parsed store: shortcut values are base64-decoded when the file
+/// already uses the v5 encoding, older versions are migrated (seeded
+/// defaults come first, same-name stored aliases replace them in place, and
+/// any other stored names are appended) and history is trimmed. A store from
+/// a newer build is returned verbatim and marked read-only. Freshly seeded
+/// stores never pass through here, so their plaintext seeds survive until
+/// the next save encodes them.
 fn accept(mut store: Store) -> Store {
     if store.version > SCHEMA_VERSION {
         store.from_newer_version = true;
         return store;
     }
+    if store.version >= SHORTCUTS_B64_VERSION {
+        decode_shortcut_values(&mut store);
+    }
     migrate(&mut store);
     trim_history(&mut store.history);
     store
+}
+
+/// Shortcut values are stored base64-encoded as of [`SHORTCUTS_B64_VERSION`];
+/// decode them into the plaintext form every consumer works with.
+/// [`decode_b64`] falls back to the raw string, so a hand-edited plaintext
+/// value still loads unchanged.
+fn decode_shortcut_values(store: &mut Store) {
+    for def in &mut store.aliases {
+        for value in def.shortcuts.values_mut() {
+            *value = decode_b64(value);
+        }
+    }
 }
 
 /// `version` field of a file that failed the typed parse, when it is still
@@ -362,6 +392,24 @@ pub fn decode_b64(s: &str) -> String {
         .ok()
         .and_then(|b| String::from_utf8(b).ok())
         .unwrap_or_else(|| s.to_string())
+}
+
+/// `#[serde(serialize_with)]` helper for the `AliasDef::shortcuts` field:
+/// writes the map with every value base64-encoded (store schema v5+, see
+/// [`SHORTCUTS_B64_VERSION`]); the keys are plain key specs and stay
+/// readable. In memory the values are always plaintext.
+pub fn serialize_shortcuts<S>(
+    map: &BTreeMap<String, String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let encoded: BTreeMap<&str, String> = map
+        .iter()
+        .map(|(key, value)| (key.as_str(), encode_b64(value)))
+        .collect();
+    encoded.serialize(serializer)
 }
 
 fn sibling_path(path: &Path, suffix: &str) -> PathBuf {

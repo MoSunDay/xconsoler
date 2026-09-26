@@ -163,8 +163,21 @@ entry carries, the executable's base name, and the pinyin initials of a
 Chinese name, so `app xx` reaches 小小备忘录 (`xiaoxiao beiwanglu`) and `app wx`
 reaches 微信. The name a single entry answers to launches it; when several
 entries match, the bar lists them and launches nothing, so it never guesses
-between two apps. On macOS the same alias hands the name to `open`, and an
-input that looks like a URL passes through to the default browser.
+between two apps. macOS hands the name — or a URL — to `open`; on Linux an
+entry starts via `gtk-launch`/`gio`/its own `Exec=`, and an input that looks
+like a URL (contains `://`) and matches no entry passes through on both
+platforms: the default browser, via `xdg-open` (or `gio open`).
+
+Web apps ride the same alias: any website becomes an entry the matcher can
+reach, the way the shipped 微信 (web) one does — run `scripts/xc-wechat` to
+install it. The script probes for a chromium-based browser (`google-chrome` →
+`chromium` → `chromium-browser` → `/snap/bin/chromium`) and rewrites the
+entry's `Exec=`, so `app 微信` / `app wx` (pinyin) / `app wechat` (keywords)
+opens `https://wx.qq.com/` in app mode as its own window (`StartupWMClass`
+groups it apart from the browser); `xc-wechat -u` removes it. The trade-off
+of pointing an entry's `Exec=` at a browser is aliasing: `app chromium` now
+matches both this entry and the system Chromium — the bar lists both and
+launches nothing until the input disambiguates.
 
 Placeholders:
 
@@ -348,8 +361,10 @@ Every change is saved to `store.json` immediately.
   the next load. `/settings` only ever reads and writes the running
   platform's field, so the other platform's stored command stays exactly as
   hand-edited.
-* Inputs are stored as **base64 of the plain text**, so quotes/unicode/newlines
-  round-trip safely and nothing secret-looking is kept in cleartext. A `cd`
+* Both history inputs and `shortcuts` values are stored as **base64 of the
+  plain text**, so quotes/unicode/newlines round-trip safely and nothing
+  secret-looking is kept in cleartext (the alias command templates themselves
+  stay plaintext). A `cd`
   run records the base64 text itself, so the history row shows the stored
   form while the clipboard gets the decoded text.
 * History: up to **100** entries, newest first, deduplicated per
