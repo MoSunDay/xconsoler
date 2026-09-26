@@ -259,9 +259,10 @@ mod tests {
         // History keeps the raw key so the shorthand stays replayable.
         assert_eq!(app.store.history[0].input(), "baidu");
 
-        // Retyping the partial now also matches the run just recorded, and
-        // history outranks the alias-scoped shortcut rows: it owns row 0, so
-        // reaching `bing` takes one move past `baidu`.
+        // Retyping the partial now also matches the run just recorded.
+        // History outranks the alias-scoped shortcut rows, and the `baidu`
+        // key row resolves to the same target as that run - it deduplicates
+        // away, so one move down reaches `bing`.
         app.input = "t b".to_string();
         assert_eq!(
             state::candidates(&app),
@@ -269,16 +270,11 @@ mod tests {
                 Candidate::History { idx: 0 },
                 Candidate::Shortcut {
                     alias: "t".to_string(),
-                    key: "baidu".to_string()
-                },
-                Candidate::Shortcut {
-                    alias: "t".to_string(),
                     key: "bing".to_string()
                 },
             ],
-            "history first, then the alias's own shortcut keys"
+            "history first; the duplicate key row is gone"
         );
-        apply(&mut app, Action::MoveDown, Platform::Linux, &path);
         apply(&mut app, Action::MoveDown, Platform::Linux, &path);
         apply(&mut app, Action::Execute, Platform::Linux, &path);
         assert_eq!(app.status, Some((true, "t ok: bing".to_string())));

@@ -1,8 +1,12 @@
 //! Candidate ranking: history always outranks shortcuts (newest first), then
 //! the shortcut rows - alias-scoped for `<alias> <partial>`, fuzzy scored
-//! otherwise - fill only the slots history leaves.
+//! otherwise - fill only the slots history leaves. Rows resolving to the same
+//! target value appear once ([`dedup_by_value`]): history wins, aliases drop.
+
+use std::collections::HashSet;
 
 use crate::alias::{self, AliasDef};
+use crate::exec;
 use crate::fuzzy;
 use crate::storage::Store;
 
@@ -37,6 +41,11 @@ pub enum Candidate {
 /// actually run predicts the next run better than a registry lookup that
 /// merely shares the same letters, so retyping `br b` re-offers the recorded
 /// `br baidu` first instead of burying it under the alias's key list.
+///
+/// The merged list (and the empty-query recency list) is deduplicated by
+/// resolved target value before the cap: a value already shown as history
+/// never repeats as a shortcut row, and equal-value history rows collapse to
+/// the newest one.
 pub fn ranked_candidates(
     store: &Store,
     aliases: &[AliasDef],
@@ -45,7 +54,7 @@ pub fn ranked_candidates(
 ) -> Vec<Candidate> {
     let query = input.trim();
     if query.is_empty() {
-        return recent_history(store, limit);
+        return dedup_by_value(store, aliases, recent_history(store, limit));
     }
 
     // `<alias> <partial>` narrows the shortcut rows to that alias's concrete
@@ -58,10 +67,50 @@ pub fn ranked_candidates(
         scoped
     };
 
-    history_hits(store, aliases, query)
+    dedup_by_value(
+        store,
+        aliases,
+        history_hits(store, aliases, query)
+            .into_iter()
+            .chain(shortcuts)
+            .collect(),
+    )
+    .into_iter()
+    .take(limit)
+    .collect()
+}
+
+/// The target text a candidate would run: a history entry resolves its
+/// recorded shorthand through the alias's shortcuts (exactly what a replay
+/// executes - `br baidu` and a raw `br https://…` are the same target), a
+/// shortcut row carries its expansion directly. `None` when the row cannot be
+/// evaluated (dangling alias name): such rows dedup against nothing.
+fn value_of(store: &Store, aliases: &[AliasDef], cand: &Candidate) -> Option<String> {
+    match cand {
+        Candidate::History { idx } => {
+            let entry = store.history.get(*idx)?;
+            Some(match alias::resolve(aliases, &entry.alias) {
+                Some(def) => exec::resolve_shortcuts(def, &entry.input()),
+                None => entry.input(),
+            })
+        }
+        Candidate::Shortcut { alias, key } => alias::resolve(aliases, alias)
+            .and_then(|def| def.shortcuts.get(key))
+            .map(|v| v.trim().to_string()),
+    }
+}
+
+/// Keep the first row per resolved value and drop the rest - history rows
+/// come first, so a value history already shows never repeats as a shortcut
+/// row. Unevaluable rows ([`value_of`] returned `None`) always stay.
+fn dedup_by_value(store: &Store, aliases: &[AliasDef], cands: Vec<Candidate>) -> Vec<Candidate> {
+    let mut seen: HashSet<String> = HashSet::new();
+    cands
         .into_iter()
-        .chain(shortcuts)
-        .take(limit)
+        .filter(|c| match value_of(store, aliases, c) {
+            Some(v) => seen.insert(v),
+            None => true,
+        })
         .collect()
 }
 
@@ -78,6 +127,7 @@ pub fn candidates(
 
 /// The most recent history entries, newest first. An empty bar shows what was
 /// run last, never shortcuts (they come back as soon as a character is typed).
+/// The caller deduplicates equal-value entries, keeping the newest.
 fn recent_history(store: &Store, limit: usize) -> Vec<Candidate> {
     (0..store.history.len().min(limit))
         .map(|idx| Candidate::History { idx })
@@ -327,16 +377,11 @@ mod tests {
         store.history.push(history("br", "gm", 2));
         store.history.push(history("gm", "x", 1));
         let out = candidates(&store, &alias::defaults(), "gm", 10);
+        // The `gm` key row resolves to the same target as `br gm`: dedup
+        // drops it, history order is the whole list.
         assert_eq!(
             out,
-            vec![
-                Candidate::History { idx: 0 },
-                Candidate::History { idx: 1 },
-                Candidate::Shortcut {
-                    alias: "br".to_string(),
-                    key: "gm".to_string()
-                },
-            ]
+            vec![Candidate::History { idx: 0 }, Candidate::History { idx: 1 }]
         );
     }
 
@@ -352,13 +397,16 @@ mod tests {
             candidates(&store, &aliases, "br", 1),
             vec![Candidate::History { idx: 0 }]
         );
+        // The `baidu` key row resolves to the same target as the recorded
+        // `br baidu` and is deduplicated away *before* the cap, so the `gm`
+        // row (a different value) slides into the slot it freed.
         assert_eq!(
             candidates(&store, &aliases, "br", 2),
             vec![
                 Candidate::History { idx: 0 },
                 Candidate::Shortcut {
                     alias: "br".to_string(),
-                    key: "baidu".to_string()
+                    key: "gm".to_string()
                 },
             ]
         );
@@ -370,14 +418,24 @@ mod tests {
     /// shares the same letters.
     #[test]
     fn history_outranks_alias_scoped_shortcuts() {
-        let mut store = Store::default();
-        store.history.push(history("br", "baidu", 1));
         let aliases = with_shortcuts();
 
-        let out = ranked_candidates(&store, &aliases, "br b", 5);
-        assert_eq!(out[0], Candidate::History { idx: 0 }, "history first");
+        // The scoped `baidu` key row resolves to the same target as the
+        // recorded `br baidu`: the value shows once, as history.
+        let mut store = Store::default();
+        store.history.push(history("br", "baidu", 1));
         assert_eq!(
-            out,
+            ranked_candidates(&store, &aliases, "br b", 5),
+            vec![Candidate::History { idx: 0 }],
+            "history wins, the duplicate key row drops"
+        );
+
+        // A recorded run with a different target leaves the narrowed keys in
+        // place, after history.
+        let mut store = Store::default();
+        store.history.push(history("br", "bb", 1));
+        assert_eq!(
+            ranked_candidates(&store, &aliases, "br b", 5),
             vec![
                 Candidate::History { idx: 0 },
                 Candidate::Shortcut {
@@ -385,7 +443,7 @@ mod tests {
                     key: "baidu".to_string()
                 },
             ],
-            "then the alias's narrowed keys"
+            "history first, then the alias's narrowed keys"
         );
     }
 
@@ -493,6 +551,53 @@ mod tests {
         assert_eq!(
             out,
             vec![Candidate::History { idx: 0 }, Candidate::History { idx: 1 }]
+        );
+    }
+
+    /// A fuzzy-ranked shortcut row whose expansion equals a shown history
+    /// target is a duplicate: it drops, other fuzzy rows stay.
+    #[test]
+    fn fuzzy_shortcut_duplicate_of_history_drops() {
+        let mut store = Store::default();
+        store.history.push(history("br", "baidu", 1));
+        let aliases = with_shortcuts();
+
+        assert_eq!(
+            ranked_candidates(&store, &aliases, "baidu", 5),
+            vec![Candidate::History { idx: 0 }],
+            "the baidu key row shares the history target and drops"
+        );
+    }
+
+    /// `br baidu` and a recorded raw `br https://www.baidu.com` run the same
+    /// target: the empty bar shows the value once, as the newest entry.
+    #[test]
+    fn equal_value_history_rows_collapse_to_newest() {
+        let mut store = Store::default();
+        store.history.push(history("br", "baidu", 2));
+        store
+            .history
+            .push(history("br", "https://www.baidu.com", 1));
+        let aliases = with_shortcuts();
+
+        assert_eq!(
+            ranked_candidates(&store, &aliases, "", 5),
+            vec![Candidate::History { idx: 0 }],
+            "same target once, newest first"
+        );
+    }
+
+    /// Rows that cannot be evaluated (the alias was deleted) never dedup
+    /// against anything - dropping them would hide replayable history.
+    #[test]
+    fn unevaluable_history_rows_are_kept() {
+        let mut store = Store::default();
+        store.history.push(history("gone", "x", 1));
+        let aliases = with_shortcuts();
+
+        assert_eq!(
+            ranked_candidates(&store, &aliases, "", 5),
+            vec![Candidate::History { idx: 0 }]
         );
     }
 }
