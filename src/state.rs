@@ -222,14 +222,8 @@ mod tests {
         app.input = "br b".to_string();
         assert_eq!(
             candidates(&app),
-            vec![
-                Candidate::History { idx: 0 },
-                Candidate::Shortcut {
-                    alias: "br".to_string(),
-                    key: "baidu".to_string()
-                },
-            ],
-            "the recorded run leads the narrowed shortcut rows"
+            vec![Candidate::History { idx: 0 }],
+            "the recorded run leads; its duplicate key row drops"
         );
         assert_eq!(selected(&app), Some(Candidate::History { idx: 0 }));
     }
