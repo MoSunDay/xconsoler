@@ -8,6 +8,7 @@ use anyhow::Result;
 
 use xconsoler::keyspec::{self, KeySpec};
 use xconsoler::launch;
+use xconsoler::matcher;
 use xconsoler::platform;
 use xconsoler::state;
 use xconsoler::storage;
@@ -156,7 +157,11 @@ pub fn run_set_command_key(path: &Path, spec: &str) -> ! {
 /// exits.
 pub fn run_print_rows(path: &Path) -> ! {
     let store = storage::load(path);
-    println!("{}", state::bar_rows(store.history.len()));
+    // The empty bar's row count - the same list `fit::desired_rows` measures
+    // at runtime (deduplicated by resolved value, capped at RECENT_LIMIT) -
+    // so xc-bar sizes exactly what the bar will draw.
+    let rows = matcher::ranked_candidates(&store, &store.aliases, "", state::RECENT_LIMIT).len();
+    println!("{}", state::bar_rows(rows));
     std::process::exit(0);
 }
 
