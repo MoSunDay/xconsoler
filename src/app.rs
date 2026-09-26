@@ -576,7 +576,7 @@ mod tests {
 
         app.input = "t here".to_string();
         apply(&mut app, Action::Execute, Platform::Linux, &path);
-        assert_eq!(app.status, Some((true, "t ok: cd /tmp".to_string())));
+        assert_eq!(app.status, Some((true, "t ok: here".to_string())));
         assert_eq!(app.store.history.len(), 1);
         assert_eq!(
             app.store.history[0].input(),
