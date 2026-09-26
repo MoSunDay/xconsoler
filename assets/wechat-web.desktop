@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=微信
+GenericName=WeChat (Web)
+Comment=WeChat web app in a chromium app-mode window
+# scripts/xc-wechat rewrites <browser> to the detected browser at install time
+Exec=<browser> --app=https://wx.qq.com/
+# No WeChat brand icon to ship: reuse the chromium one instead.
+Icon=chromium-browser
+Terminal=false
+Categories=Network;InstantMessaging;
+Keywords=wechat;wx;微信;
+# Chromium app mode sets the window class from the origin, so the window
+# groups separately in the taskbar.
+StartupWMClass=wx.qq.com
