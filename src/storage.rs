@@ -19,19 +19,20 @@ pub const MAX_HISTORY: usize = 100;
 
 /// Current on-disk schema version.
 ///
-/// Version 5 base64-encodes every `"shortcuts"` value on disk (values can
-/// carry tokens, URLs and paths), mirroring the `input_b64` history field;
-/// [`load`] decodes them again, and older stores keep their plaintext
-/// values until the next save encodes them. Version 4 seeded the `app`
-/// alias (native application launcher), which older snapshots get appended
-/// by [`migrate`]. Version 3 renamed the alias JSON keys to the UI
-/// vocabulary (`"triggers"` for the trigger words, `"shortcuts"` for the
-/// key → value map); the manual `AliasDef` deserializer normalizes legacy
-/// keys while loading. Version 2 was the first full snapshot: stores older
-/// than 2 carry *overrides* of the seeded defaults only, so [`load`] merges
-/// the defaults back in for them; any store older than this constant is
-/// bumped to it.
-pub const SCHEMA_VERSION: u32 = 5;
+/// Version 6 seeded the `pw` alias (native password generator), which older
+/// snapshots get appended by [`migrate`]. Version 5 base64-encodes every
+/// `"shortcuts"` value on disk (values can carry tokens, URLs and paths),
+/// mirroring the `input_b64` history field; [`load`] decodes them again,
+/// and older stores keep their plaintext values until the next save
+/// encodes them. Version 4 seeded the `app` alias (native application
+/// launcher). Version 3 renamed the alias JSON keys to the UI vocabulary
+/// (`"triggers"` for the trigger words, `"shortcuts"` for the key → value
+/// map); the manual `AliasDef` deserializer normalizes legacy keys while
+/// loading. Version 2 was the first full snapshot: stores older than 2
+/// carry *overrides* of the seeded defaults only, so [`load`] merges the
+/// defaults back in for them; any store older than this constant is bumped
+/// to it.
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// First schema version whose files carry base64-encoded shortcut values;
 /// stores at or above it are decoded on load (see [`accept`]). Kept apart
@@ -93,9 +94,9 @@ fn default_command_key() -> String {
 }
 
 /// Persisted state. `aliases` holds exactly what the store carries: a fresh
-/// store is seeded with [`alias::defaults`] (`br` and `cd`), and every entry,
-/// seeded or not, is editable and deletable like any other. Older stores are
-/// migrated on load (see [`load`]).
+/// store is seeded with [`alias::defaults`] (`br`, `cd`, `app` and `pw`), and
+/// every entry, seeded or not, is editable and deletable like any other.
+/// Older stores are migrated on load (see [`load`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Store {
     /// `#[serde(default)]`: stores written before the config existed load
@@ -265,9 +266,10 @@ fn read_fallback(path: &Path, legacy: Option<&Path>) -> Store {
 }
 
 /// Shared version migration: stores older than version 2 hold only overrides
-/// of the seeded defaults, so the defaults are merged back in first; version 4
-/// seeded a new `app` alias, so older snapshots get it appended unless they
-/// already define that name; every older version is then bumped to
+/// of the seeded defaults, so the defaults are merged back in first; version
+/// 4 seeded a new `app` alias and version 6 a new `pw` alias, so older
+/// snapshots get them appended unless they already define those names; every
+/// older version is then bumped to
 /// [`SCHEMA_VERSION`]. Version 5 needs no in-memory transform here: shortcut
 /// values are plaintext in memory at every version, and only the on-disk
 /// encoding changed, which [`save`] applies. The alias deserializer has
@@ -278,6 +280,9 @@ fn migrate(store: &mut Store) {
     }
     if store.version < 4 {
         append_default_alias(&mut store.aliases, crate::launch::default_def());
+    }
+    if store.version < 6 {
+        append_default_alias(&mut store.aliases, crate::plugins::pw::default_def());
     }
     if store.version < SCHEMA_VERSION {
         store.version = SCHEMA_VERSION;

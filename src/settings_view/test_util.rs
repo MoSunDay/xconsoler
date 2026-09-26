@@ -39,6 +39,10 @@ pub(super) fn draw_at(w: u16, h: u16, st: &Settings, aliases: &[AliasDef]) -> St
 
 pub(super) fn t_store() -> (Store, Vec<AliasDef>) {
     let mut store = Store::default();
+    // The schema-v6 `pw` seed is dropped so `t` keeps its fixed index 3 and
+    // stays inside the small drawn bar; the seed inventory itself is
+    // covered by alias::tests and storage::tests.
+    store.aliases.retain(|d| d.name != "pw");
     store.aliases.push(AliasDef {
         name: "t".to_string(),
         triggers: vec!["tt".to_string()],

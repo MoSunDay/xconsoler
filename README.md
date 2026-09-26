@@ -23,6 +23,7 @@ xconsoler --summon                         # shell-keybind mode (see SSH section
 xconsoler --print-bind [--shell zsh]       # emit the shell binding line
 xconsoler --print-rows                     # print bar height in rows (used by scripts/xc-bar)
 xconsoler --print-app 微信                  # print the app `app 微信` would launch
+xconsoler --print-pass "medium 16"        # print one password, no TUI
 xconsoler --set-wake-key alt+j             # change + persist the wake key
 xconsoler -h | --help                      # usage
 ```
@@ -113,12 +114,34 @@ hotkey below.
 | `br`  | `xdg-open {input} >/dev/null 2>&1 &`         | `open {input} >/dev/null 2>&1 &` | `baidu` -> `https://www.baidu.com`, `gm` -> `https://mail.google.com` |
 | `cd`  | `@native clipboard` (native Rust backend)    | `@native clipboard` | -             |
 | `app` | `@native app` (installed applications)       | `@native app`       | -             |
+| `pw`  | `@native pw` (password generator, see below) | `@native pw`        | `s` -> `simple`, `m` -> `medium`, `c` -> `complex` |
 
-Every fresh store seeds exactly `br`, `cd` and `app`, concrete content included
+Every fresh store seeds exactly `br`, `cd`, `app` and `pw`, concrete content included
 - the command templates above *and* the shortcuts - so `br baidu` works on a machine
 with no store copy yet. They are ordinary store entries: edit or delete them
 on the settings page (or with `:del`), and bring them back with `:add`. Add
 more with `:arg` or the settings page.
+
+### Password generator (`pw`)
+
+`pw` generates a password, copies it to the clipboard and shows it in the
+status line. The spec is `[simple|medium|complex] [length]`:
+
+| Profile  | Characters                  | Default length |
+|----------|-----------------------------|----------------|
+| `simple` | lowercase + digits          | 8              |
+| `medium` | upper + lower + digits      | 16             |
+| `complex` (default) | those + specials (!@#$%^&*-_=+?~) | 32   |
+
+A trailing number overrides the profile default (`pw medium 24`), and the
+seeded shortcuts expand: `pw s`, `pw m`, `pw c`. Only the *spec* (`pw medium
+16`) is kept in history - the generated password itself is never persisted.
+The specials avoid quotes, spaces and backslashes so they paste cleanly, but `!` still triggers history expansion in an interactive bash - quote the password there.
+Headless use prints one password and exits, nothing copied:
+
+```sh
+xconsoler --print-pass "medium 16"
+```
 
 Commands run in their own process group, so the apps they launch survive the
 bar dismissing itself (a summon success closes the terminal right away). A
@@ -330,7 +353,7 @@ Every change is saved to `store.json` immediately.
   left at the old `~/.config/xconsoler/store.json` path is picked up once,
   when the **default** path does not exist yet; a custom `--store` never
   falls back to it.
-* The file carries `version` (currently `3`). Stores older than 2 hold only
+* The file carries `version` (currently `6`). Stores older than 2 hold only
   overrides of the seeded `br`/`cd`, so loading merges those defaults back in
   (same-name stored aliases replace them in place, other names are appended);
   legacy alias keys are normalized in memory. The new form reaches disk the
@@ -356,7 +379,7 @@ Every change is saved to `store.json` immediately.
   {"name":"br","triggers":["b"],"linux":"xdg-open {input}","macos":null,
    "shortcuts":{"baidu":"https://www.baidu.com"}}
   ```
-  Hand-editing is supported; keep the top-level `"version": 3`, because a file
+  Hand-editing is supported; keep the top-level `"version": 6`, because a file
   without it counts as pre-v2 and gets the seeded defaults merged back in on
   the next load. `/settings` only ever reads and writes the running
   platform's field, so the other platform's stored command stays exactly as

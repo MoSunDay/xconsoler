@@ -42,10 +42,11 @@ fn legacy_store_json_loads_and_saves_with_the_new_keys() {
 }
 
 /// A v4 file stores shortcut values as plaintext: they load exactly as
-/// written, and the next save rewrites the file at version 5 with every
-/// value base64-encoded. Re-loading that file restores the plaintext.
+/// written, and the next save rewrites the file at the current version (6)
+/// with every value base64-encoded. Re-loading that file restores the
+/// plaintext.
 #[test]
-fn v4_plaintext_shortcuts_resave_as_base64_at_version_5() {
+fn v4_plaintext_shortcuts_resave_as_base64_at_the_current_version() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.json");
     fs::write(
@@ -67,7 +68,7 @@ fn v4_plaintext_shortcuts_resave_as_base64_at_version_5() {
     save(&path, &store).unwrap();
     let json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(json["version"], serde_json::json!(5));
+    assert_eq!(json["version"], serde_json::json!(6));
     assert_eq!(
         json["aliases"][0]["shortcuts"]["zhipu"],
         serde_json::json!(encode_b64("https://bigmodel.cn/console/overview")),
@@ -151,8 +152,8 @@ fn shortcut_json_shapes_load_into_the_new_model() {
     );
     assert_eq!(
         store.aliases.len(),
-        1,
-        "a v4 snapshot is not backfilled with the newer seeds"
+        2,
+        "a v4 snapshot keeps its aliases (plus the version-6 pw seed)"
     );
 
     let parse = |json: &str| serde_json::from_str::<AliasDef>(json).unwrap();
@@ -169,10 +170,11 @@ fn shortcut_json_shapes_load_into_the_new_model() {
 }
 
 /// Version 2 stores are full snapshots: the older version bumps must not
-/// merge the seeded defaults back in. The `app` seed added in version 4 is
-/// the exception - every snapshot older than 4 gets it appended once.
+/// merge the seeded defaults back in. The `app` seed added in version 4 and
+/// the `pw` seed added in version 6 are the exceptions - every snapshot
+/// older than those versions gains them appended once.
 #[test]
-fn version_2_store_keeps_its_aliases_and_gains_the_app_seed() {
+fn version_2_store_keeps_its_aliases_and_gains_the_newer_seeds() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.json");
     let old = Store {
@@ -190,14 +192,15 @@ fn version_2_store_keeps_its_aliases_and_gains_the_app_seed() {
             .iter()
             .map(|d| d.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["mine", "app"],
-        "a v2 snapshot keeps its aliases and gains only the new seed"
+        vec!["mine", "app", "pw"],
+        "a v2 snapshot keeps its aliases and gains only the newer seeds"
     );
     assert_eq!(store.aliases[0].linux.as_deref(), Some("echo hi"));
 }
 
 /// Version 4 seeded `app`: v3 snapshots gain it at the end, while v4
-/// snapshots stay exactly as written.
+/// snapshots do not (they still gain the version-6 `pw` seed, covered by
+/// `version_4_and_5_stores_gain_the_pw_alias_once` below).
 #[test]
 fn version_3_store_gains_the_app_alias_once() {
     let dir = tempfile::tempdir().unwrap();
@@ -215,7 +218,7 @@ fn version_3_store_gains_the_app_alias_once() {
         if version < 4 {
             assert_eq!(
                 names,
-                vec!["br", "app"],
+                vec!["br", "app", "pw"],
                 "a v{version} store gains the seed"
             );
             let app = &store.aliases[1];
@@ -223,14 +226,49 @@ fn version_3_store_gains_the_app_alias_once() {
             assert_eq!(app.macos.as_deref(), Some(crate::launch::TEMPLATE));
             assert!(app.triggers.is_empty());
         } else {
-            assert_eq!(names, vec!["br"], "a v4 snapshot gains nothing");
+            assert_eq!(
+                names,
+                vec!["br", "pw"],
+                "a v4 snapshot gains no app, only the pw seed"
+            );
+        }
+        assert_eq!(store.version, SCHEMA_VERSION);
+    }
+}
+
+/// Version 6 seeded `pw`: v4 and v5 snapshots gain it at the end, while v6
+/// snapshots stay exactly as written.
+#[test]
+fn version_4_and_5_stores_gain_the_pw_alias_once() {
+    let dir = tempfile::tempdir().unwrap();
+    for version in [4u32, 5u32, 6u32] {
+        let path = dir.path().join(format!("store-{version}.json"));
+        let saved = Store {
+            version,
+            aliases: vec![user_def("br", Some("echo replaced"))],
+            ..Store::default()
+        };
+        save(&path, &saved).unwrap();
+
+        let store = load(&path);
+        let names: Vec<&str> = store.aliases.iter().map(|d| d.name.as_str()).collect();
+        if version < 6 {
+            assert_eq!(names, vec!["br", "pw"], "a v{version} store gains the seed");
+            let pw = &store.aliases[1];
+            assert_eq!(pw.linux.as_deref(), Some(crate::plugins::pw::TEMPLATE));
+            assert_eq!(pw.macos.as_deref(), Some(crate::plugins::pw::TEMPLATE));
+            assert!(pw.triggers.is_empty());
+            assert_eq!(pw.shortcuts.len(), 3, "s/m/c profile shortcuts");
+        } else {
+            assert_eq!(names, vec!["br"], "a v6 snapshot gains nothing");
         }
         assert_eq!(store.version, SCHEMA_VERSION);
     }
 }
 
 /// A user alias that already owns the name `app` is never duplicated by the
-/// version-4 backfill, case-insensitively.
+/// version-4 backfill, case-insensitively. (A v3 snapshot still gains the
+/// version-6 `pw` seed - that gate is covered by its own tests below.)
 #[test]
 fn a_stored_alias_named_app_wins_over_the_seed() {
     let dir = tempfile::tempdir().unwrap();
@@ -243,8 +281,34 @@ fn a_stored_alias_named_app_wins_over_the_seed() {
     save(&path, &saved).unwrap();
 
     let store = load(&path);
+    assert_eq!(
+        store
+            .aliases
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["App", "pw"],
+        "the user's alias is not duplicated, only the pw seed is appended"
+    );
+    assert_eq!(store.aliases[0].linux.as_deref(), Some("echo mine"));
+}
+
+/// A user alias that already owns the name `pw` is never duplicated by the
+/// version-6 backfill, case-insensitively.
+#[test]
+fn a_stored_alias_named_pw_wins_over_the_seed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+    let saved = Store {
+        version: 5,
+        aliases: vec![user_def("PW", Some("echo mine"))],
+        ..Store::default()
+    };
+    save(&path, &saved).unwrap();
+
+    let store = load(&path);
     assert_eq!(store.aliases.len(), 1, "the user's alias is not duplicated");
-    assert_eq!(store.aliases[0].name, "App");
+    assert_eq!(store.aliases[0].name, "PW");
     assert_eq!(store.aliases[0].linux.as_deref(), Some("echo mine"));
 }
 

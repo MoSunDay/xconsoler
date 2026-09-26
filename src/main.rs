@@ -30,7 +30,7 @@ use xconsoler::term::TerminalGuard;
 mod cli;
 
 use cli::{
-    parse_args, run_print_app, run_print_bind, run_print_rows, run_set_command_key,
+    parse_args, run_print_app, run_print_bind, run_print_pass, run_print_rows, run_set_command_key,
     run_set_wake_key, USAGE,
 };
 
@@ -77,6 +77,9 @@ fn main() {
     }
     if let Some(name) = cli.print_app.clone() {
         run_print_app(&name);
+    }
+    if let Some(spec) = cli.print_pass.clone() {
+        run_print_pass(&spec);
     }
 
     // zle widgets (zsh) run external commands with stdin redirected from

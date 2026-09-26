@@ -188,6 +188,12 @@ pub fn run_alias(def: &AliasDef, input: &str, platform: Platform) -> ExecOutcome
         };
     }
 
+    // Built-in plugins (`@native pw`, …): mini-tools that never need a
+    // shell, dispatched through the registry in `crate::plugins`.
+    if crate::plugins::is_native(template) {
+        return crate::plugins::run_native(template, input);
+    }
+
     let needs_stdin = template.contains(STDIN_MARKER);
     let mut cmd = if needs_stdin {
         // sh treats the leftover doubled spaces as a single separator.
@@ -444,6 +450,31 @@ mod tests {
             run_alias(&app, "", Platform::Macos),
             ExecOutcome::Failure("app name required".to_string())
         );
+    }
+
+    #[test]
+    fn pw_plugin_generates_and_reports_the_password() {
+        // The seeded def dispatches to the plugin registry, not a shell.
+        let def = crate::plugins::pw::default_def();
+        assert!(!uses_native_clipboard(&def, Platform::Linux));
+        match run_alias(&def, "", Platform::Linux) {
+            // Headless test box or not: generation itself succeeds, only
+            // the copy may fail, and the message always carries the
+            // password right after the `pw ok:` prefix.
+            ExecOutcome::Success(msg) => {
+                assert!(msg.starts_with("pw ok: "), "{msg}");
+                let password = msg
+                    .strip_prefix("pw ok: ")
+                    .and_then(|rest| rest.split(" (").next())
+                    .unwrap();
+                assert_eq!(password.len(), 32, "empty spec means complex/32: {msg}");
+            }
+            other => panic!("expected Success, got {other:?}"),
+        }
+        assert!(matches!(
+            run_alias(&def, "bogus!", Platform::Linux),
+            ExecOutcome::Failure(_)
+        ));
     }
 
     #[test]

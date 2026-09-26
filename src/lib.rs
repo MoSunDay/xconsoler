@@ -15,6 +15,7 @@ pub mod keyspec;
 pub mod launch;
 pub mod matcher;
 pub mod platform;
+pub mod plugins;
 pub mod render;
 pub mod render_list;
 #[cfg(test)]

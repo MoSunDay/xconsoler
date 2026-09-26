@@ -184,8 +184,8 @@ fn migration_merges_defaults_into_an_old_store() {
             .iter()
             .map(|d| d.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["br", "cd", "app", "mine"],
-        "defaults come first, overrides replace in place, extras append"
+        vec!["br", "cd", "app", "pw", "mine"],
+        "defaults come first, overrides replace in place, extras append, then the pw seed"
     );
     let br = &store.aliases[0];
     assert_eq!(br.linux.as_deref(), Some("echo replaced"));
@@ -223,7 +223,7 @@ fn store_without_version_is_migrated() {
             .iter()
             .map(|d| d.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["br", "cd", "app", "mine"]
+        vec!["br", "cd", "app", "pw", "mine"]
     );
 }
 

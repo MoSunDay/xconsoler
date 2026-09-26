@@ -231,7 +231,11 @@ mod tests {
         assert_eq!(reloaded.history.len(), 1);
         assert_eq!(reloaded.history[0].input(), "hello");
         assert_ne!(reloaded.history[0].input_b64, "hello"); // stored base64
-        assert_eq!(reloaded.aliases.len(), 4, "br, cd, app and t round-trip");
+        assert_eq!(
+            reloaded.aliases.len(),
+            5,
+            "br, cd, app, pw and t round-trip"
+        );
         let t = reloaded.aliases.iter().find(|d| d.name == "t").unwrap();
         assert_eq!(t.triggers, vec!["tt".to_string()]);
     }
