@@ -29,6 +29,8 @@ use crate::platform::Platform;
 /// list and `"args"` for the map; the manual [`Deserialize`] normalizes both
 /// forms: a `"triggers"` array wins over a legacy `"shortcuts"` array, a
 /// `"shortcuts"` map wins over `"args"`, and a missing list or map is empty.
+/// As of store schema v5 every `"shortcuts"` value is written base64-encoded
+/// (see [`crate::storage::serialize_shortcuts`]).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AliasDef {
     pub name: String,
@@ -37,7 +39,11 @@ pub struct AliasDef {
     pub linux: Option<String>,
     pub macos: Option<String>,
     /// Concrete registered shortcuts: typing `<alias> <key> <more…>` maps
-    /// `<key>` to this value before the command runs.
+    /// `<key>` to this value before the command runs. Values are plaintext
+    /// in memory; on disk (store schema v5+) each value is base64-encoded
+    /// by [`crate::storage::serialize_shortcuts`], mirroring history's
+    /// `input_b64`, and decoded again on load.
+    #[serde(serialize_with = "crate::storage::serialize_shortcuts")]
     pub shortcuts: BTreeMap<String, String>,
 }
 
