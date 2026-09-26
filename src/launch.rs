@@ -53,7 +53,7 @@ pub fn default_def() -> AliasDef {
 /// An application to launch, plus what the status line should say about it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolved {
-    /// Display label of the entry, or the URL itself on macOS.
+    /// Display label of the entry, or the URL itself.
     pub label: String,
     /// Where it came from: desktop file path, `.app` path, or the URL.
     pub source: String,
@@ -112,10 +112,14 @@ pub fn resolve(input: &str, platform: Platform) -> Match {
     )
 }
 
-/// On macOS a URL passes through when no application matches: `open` hands it
-/// to the default browser, the same thing the desktop would do.
-fn url_fallback(input: &str, platform: Platform, matched: Match) -> Match {
-    if platform != Platform::Macos || !matches!(matched, Match::None) {
+/// A URL passes through when no application matches: every platform has an
+/// opener that hands the address to the default handler -- `open` on macOS,
+/// `xdg-open` (or `gio open`) on Linux -- the same thing the desktop would
+/// do. `_platform` stays a parameter so callers and tests can pin the
+/// passthrough as cross-platform; which opener runs is [`command_for`]'s
+/// business.
+fn url_fallback(input: &str, _platform: Platform, matched: Match) -> Match {
+    if !matches!(matched, Match::None) {
         return matched;
     }
     let url = input.trim();
@@ -197,18 +201,51 @@ fn spawn(target: &Resolved, platform: Platform) -> Outcome {
     wait_grace(child, &target.label)
 }
 
+/// True when `target` came from [`url_fallback`]: the source is the address
+/// itself, not a desktop file path, so the entry launchers do not apply.
+/// Detected through the `scheme://` every supported URL carries and no
+/// desktop path ever does.
+fn is_url(target: &Resolved) -> bool {
+    target.source.contains("://")
+}
+
+/// Command handing `target.source` to `opener`. `gio` is a multi-tool and
+/// needs its `open` subcommand first; `open` and `xdg-open` are openers
+/// already and take the address directly.
+fn url_command(target: &Resolved, opener: &str) -> Command {
+    let mut command = Command::new(opener);
+    if opener == "gio" {
+        command.arg("open");
+    }
+    command.arg(&target.source);
+    command
+}
+
+/// Linux URL openers, best first: `xdg-open` is the freedesktop standard
+/// every desktop ships, `gio` the GNOME fallback already probed for entry
+/// launching.
+const URL_OPENERS: [&str; 2] = ["xdg-open", "gio"];
+
 /// Launcher command for `target`, best first.
 ///
-/// Linux prefers the desktop's own launchers: `gtk-launch` by id, then
-/// `gio launch` on the file, both of which handle startup notification and
-/// DBus activation. With neither installed, the entry's own `Exec=` runs
-/// through `setsid sh -c`, a new session so the app leaves the bar behind.
-/// macOS has exactly one answer: `open` on the `.app` bundle or URL.
+/// macOS has exactly one answer: `open` on the `.app` bundle or URL. Linux
+/// URLs go to an opener before anything else -- no desktop file stands
+/// behind them. Entries prefer the desktop's own launchers: `gtk-launch` by
+/// id, then `gio launch` on the file, both of which handle startup
+/// notification and DBus activation. With neither installed, the entry's own
+/// `Exec=` runs through `setsid sh -c`, a new session so the app leaves the
+/// bar behind.
 fn command_for(target: &Resolved, platform: Platform) -> Option<Command> {
     if platform == Platform::Macos {
         let mut command = Command::new("open");
         command.arg(&target.source);
         return Some(command);
+    }
+    // URLs first: `gtk-launch` by id would mangle the address, reading
+    // `file_stem("https://x.qq")` as an id that matches no entry.
+    if is_url(target) {
+        let opener = URL_OPENERS.iter().copied().find(|p| desktop::on_path(p))?;
+        return Some(url_command(target, opener));
     }
     if desktop::on_path("gtk-launch") {
         if let Some(stem) = Path::new(&target.source).file_stem() {
