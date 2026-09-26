@@ -30,18 +30,22 @@ Request: `app 接上 chrome wechat` — make the seeded `app` alias
   `xdg-open` → `gio open` branch for `exec: None` targets); tests in
   `src/launch/tests.rs`.
 
-## Verified state at close
+## Verified state at close (blueprint applied 2026-09-26)
 
-User marked the task complete. Inspection of the repo at `f9dcbbd`
-(clean tree, reflog, src/scripts/assets, `~/.local/share/applications`)
-found **no artifacts of this feature** — no `xc-wechat`, no
-`wechat-web.desktop`, no `url_fallback` change. Treat the blueprint above
-as not yet applied in this repository.
+A + B are both in the tree now (README `app`/web-apps wording landed via
+3dc9034; the rest in the two `feat(app)` commits that follow):
 
-Verify with:
+- `assets/wechat-web.desktop` + `scripts/xc-wechat` (xc-icon style;
+  detected browser here: `/snap/bin/chromium`). Installed to
+  `~/.local/share/applications/wechat-web.desktop`.
+- `src/launch.rs`: `url_fallback` passes `://` inputs through on both
+  platforms when nothing matched; `command_for` routes URL targets to
+  `xdg-open` (else `gio open`) before the desktop-entry launchers.
+  `src/launch/tests.rs` covers both purely (no PATH dependence).
 
-```sh
-xconsoler --print-app 微信   # prints the wechat-web entry once installed
-xconsoler --print-app wx
-cargo test                   # after any src/launch.rs change
-```
+Verified headless: `cargo fmt/clippy/test` clean (448 tests);
+`--print-app 微信|wx|wechat` -> the wechat entry; `--print-app
+https://wx.qq.com` -> URL passthrough (rc 0); `--print-app chromium`
+-> the expected 2-way ambiguity; `xc-wechat -u` round-trips. The live
+bar check (`app wx` -> chromium app-mode window) needs a real session
+(no DISPLAY here).
