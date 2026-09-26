@@ -54,10 +54,12 @@ pub fn execute(app: &mut App, platform: Platform, path: &Path) {
     match exec::run_alias(&def, &payload, platform) {
         ExecOutcome::Success(_) => {
             history::record(&mut app.store, &def.name, &input, now_secs());
-            let shown = if run_input.trim().is_empty() {
+            // The status echoes the raw text, not the expanded value:
+            // history records the raw key too, so neither restates it.
+            let shown = if input.trim().is_empty() {
                 def.name.clone()
             } else {
-                run_input.clone()
+                input.clone()
             };
             crate::app::set_input(app, String::new());
             // The run succeeded either way; only persistence can still fail.
@@ -253,10 +255,7 @@ mod tests {
         app.input = "t b".to_string();
         app.cursor = 0;
         apply(&mut app, Action::Execute, Platform::Linux, &path);
-        assert_eq!(
-            app.status,
-            Some((true, "t ok: https://example.com/b".to_string()))
-        );
+        assert_eq!(app.status, Some((true, "t ok: baidu".to_string())));
         // History keeps the raw key so the shorthand stays replayable.
         assert_eq!(app.store.history[0].input(), "baidu");
 
@@ -282,10 +281,7 @@ mod tests {
         apply(&mut app, Action::MoveDown, Platform::Linux, &path);
         apply(&mut app, Action::MoveDown, Platform::Linux, &path);
         apply(&mut app, Action::Execute, Platform::Linux, &path);
-        assert_eq!(
-            app.status,
-            Some((true, "t ok: https://example.com/i".to_string()))
-        );
+        assert_eq!(app.status, Some((true, "t ok: bing".to_string())));
     }
 
     #[test]
@@ -302,10 +298,7 @@ mod tests {
         app.input = "baidu".to_string();
         app.cursor = 0;
         apply(&mut app, Action::Execute, Platform::Linux, &path);
-        assert_eq!(
-            app.status,
-            Some((true, "t ok: https://example.com/b".to_string()))
-        );
+        assert_eq!(app.status, Some((true, "t ok: baidu".to_string())));
         // ...while history keeps the shorthand, exactly like the
         // resolving-head picker path.
         assert_eq!(app.store.history[0].input(), "baidu");
@@ -328,10 +321,7 @@ mod tests {
         app.cursor = 1;
         assert_eq!(shortcut_override(&app, def, "baidu"), None);
         apply(&mut app, Action::Execute, Platform::Linux, &path);
-        assert_eq!(
-            app.status,
-            Some((true, "t ok: https://example.com/b".to_string()))
-        );
+        assert_eq!(app.status, Some((true, "t ok: baidu".to_string())));
     }
 
     #[test]
