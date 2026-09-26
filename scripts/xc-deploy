@@ -47,10 +47,10 @@ scp -q $files "$target:$dest/" || exit 1
 ssh "$target" "cd '$dest' && chmod 755 $(for f in $files; do printf '%s ' "$(basename -- "$f")"; done)" || exit 1
 
 # Smoke test: the binary runs on the target and agrees on the bare height
-# (11 = room for the typed candidate set; see state::CANDIDATE_LIMIT).
+# (4 = the bare box for an empty store; see state::bar_rows).
 rows=$(ssh "$target" 'd=$(mktemp -d); XC_PRINT_ROWS=1 xconsoler --print-rows --store "$d/store.json"; r=$?; rm -rf "$d"; exit $r') || {
     echo "installed, but 'xconsoler --print-rows' failed on $target" >&2; exit 1; }
 echo "ok: $(basename -- "$bin") installed, bare height ${rows} rows"
-[ "$rows" = 11 ] || echo "note: expected 11 bare rows, got $rows" >&2
+[ "$rows" = 4 ] || echo "note: expected 4 bare rows, got $rows" >&2
 echo "shell-key mode:   xconsoler --print-bind >> ~/.bashrc   (on $target)"
 [ "$desktop" = 1 ] && echo "desktop mode:     xc-bar | xc-key alt+d            (on the target's X session)"
