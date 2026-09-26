@@ -1,4 +1,7 @@
-# pw plugin — built-in password generator (2026-09-26)
+# pw plugin — built-in password generator (closed 2026-09-26)
+
+Shipped as `ae7c14c`: fmt + two clippy lints in `pw/tests.rs` fixed pre-commit,
+470 tests green on the final tree.
 
 First entry in the new `src/plugins/` home for built-in `@native` mini-tools.
 
