@@ -75,17 +75,19 @@ window scrolls once you reach its bottom - and `Enter` runs the highlighted
 row: a history row replays its recorded pair, a shortcut row runs the
 registered value. The whole alias table lives on the `/settings` page.
 
-**The bar's frame is sized once and then stays put.** Its height carries the
-stored history an empty bar lists (6 rows plus one per recent entry, 16 at
-most) and is never less than room for the typed candidate set (11 rows for
-the 5 candidates a query can rank). Typing a query, clearing it or replaying
-a command only changes the candidate list's *contents*, so the window cannot
-flicker under your fingers; the palette keeps one fixed height for its whole
-open session and only `/settings` - a full page, not a bar - grows the
-window. A plain `xconsoler` run shrinks the terminal it was started from just
-like a summoned bar shrinks its own window; the size the window had at
-startup (or the last one you picked by dragging it) comes back when the bar
-exits. It first writes
+**The bar's height follows its candidate list.** The window fits what the
+list is showing - the 3-row input box, the framed list and the status row,
+one row per visible candidate, 4 rows for an empty list and 16 at most -
+and the input box itself never moves: it owns the top rows, only the list
+(and the window under it) grows or shrinks. Height changes settle first:
+typing reshuffles the candidate count on every keystroke, and a resize per
+key would bounce the frame under your fingers, so a new height is only
+asked for once it has stayed wanted for a moment (~400ms). The palette
+keeps one fixed height for its whole open session and only `/settings` - a
+full page, not a bar - grows the window. A plain `xconsoler` run shrinks
+the terminal it was started from just like a summoned bar shrinks its own
+window; the size the window had at startup (or the last one you picked by
+dragging it) comes back when the bar exits. It first writes
 the in-band request `ESC[8;<rows>;<cols>t`; terminals that ignore it (xterm
 without `allowWindowOps`, VTE, alacritty) are covered under X11 by `xdotool
 getactivewindow windowsize --usehints <cols> <rows>`, which sizes in character
@@ -204,9 +206,11 @@ Now `br baidu` opens `https://www.baidu.com`, while plain `br` and
 `br <anything else>` behave exactly as before: typing `<alias> <key>` ranks
 that key's value first, so `Enter` resolves it. The bar itself stays a
 single input line - the registered shortcuts are listed on the `/settings`
-page (`↳ baidu · https://www.baidu.com`). Values may contain spaces; history
-keeps the raw text (`baidu`), so the shorthand stays replayable. Shortcuts
-are edited in place on the settings page (`e` on a shortcut row) or replaced
+page (`↳ baidu` - the registered value is not restated in the row; the
+`br ok:` status line keeps the shorthand too, e.g. `br ok: baidu`). Values
+may contain spaces; history keeps the raw text (`baidu`), so the shorthand
+stays replayable. Shortcuts are edited in place on the settings page (`e`
+on a shortcut row) or replaced
 with `:arg`; aliases are plain store data, seeded ones included.
 
 Triggers live on the alias itself, comma-separated after its name:
@@ -419,12 +423,12 @@ background. The window is a **quarter of the screen wide**, centred, with its
 top edge following the mouse cursor - 52 cells wide, 4..16 tall, on a 1920px
 screen.
 
-Its height is fixed for the session: room for the store's **recent history**
-(the 3-row input box + the list's title/borders + the status/hints row + one
-per recent entry, topping out at 16 for the 10 entries the list shows) and
-never less than room for the typed candidate set, so a query cannot resize
-the bar. A store that cannot be read (corrupt ones count as no history) or a
-missing python3 means the old 16-row default. The TUI itself shrinks the list into whatever it is given: a framed
+Its height follows the list the bar is showing (the 3-row input box + the
+list's title/borders + the status/hints row + one per visible candidate,
+4..16 rows; the launch geometry fits the store's recent history) and
+settles for a moment before changing, so typing cannot bounce the window
+while the input box keeps the top rows. A store that cannot be read (corrupt
+ones count as no history) or a missing python3 means the old 16-row default. The TUI itself shrinks the list into whatever it is given: a framed
 block while the border/title and a row fit, bare rows in a slim strip, with
 the key hints the first thing to go - so `XC_ROWS=4` is a usable one-liner
 strip. `/settings` still draws its table in place from ~8 rows up; below that

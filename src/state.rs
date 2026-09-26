@@ -18,17 +18,19 @@ pub const CANDIDATE_LIMIT: usize = 5;
 /// hard-coded, so the cap can never silently drift from the list geometry.
 pub const MAX_BAR_ROWS: u16 = (6 + RECENT_LIMIT) as u16;
 
-/// Rows the desktop bar wants for a store holding `history_len` entries:
-/// the 6 fixed rows (3-row input box + 2 rows of candidate-list
-/// frame/title + 1-row status line) plus one row per recent entry (up to
-/// [`RECENT_LIMIT`]). An empty store gets the bare box; the result never
-/// exceeds [`MAX_BAR_ROWS`]. Exposed headlessly as `--print-rows`, so
-/// `scripts/xc-bar` can size the terminal without a scripting runtime.
-pub fn bar_rows(history_len: usize) -> u16 {
-    if history_len == 0 {
+/// Rows the desktop bar wants to fit a list showing `rows` entries: the 6
+/// fixed rows (3-row input box + 2 rows of candidate-list frame/title +
+/// 1-row status line) plus one row per entry (up to [`RECENT_LIMIT`]) -
+/// `rows` is the recent-history count on the empty bar, the live candidate
+/// count once the bar follows its list. An empty list gets the bare box;
+/// the result never exceeds [`MAX_BAR_ROWS`]. Exposed headlessly as
+/// `--print-rows`, so `scripts/xc-bar` can size the terminal without a
+/// scripting runtime.
+pub fn bar_rows(rows: usize) -> u16 {
+    if rows == 0 {
         4
     } else {
-        (6 + history_len.min(RECENT_LIMIT) as u16).min(MAX_BAR_ROWS)
+        (6 + rows.min(RECENT_LIMIT) as u16).min(MAX_BAR_ROWS)
     }
 }
 

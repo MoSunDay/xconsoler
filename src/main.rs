@@ -153,11 +153,13 @@ fn run(
     }
     let mut guard = EscGuard::new();
 
-    // Window auto-fit, resolved once: the bar keeps one session height
-    // unless `XC_ROWS` pinned it or `XC_NO_FIT` opted out, so typing only
-    // changes the candidate list's contents, never the window. Inside a tmux
-    // pane the request travels through the passthrough envelope and targets
-    // the outer window; the X11 fallback covers the terminals that ignore the
+    // Window auto-fit, live: the height follows the candidate list (the
+    // launch geometry already aims at the empty bar's height), and a new
+    // height is only asked for once it survives `fit::SETTLE`, so typing
+    // cannot bounce the frame. The input box keeps the top rows; only the
+    // list and the window under it change. Inside a tmux pane the request
+    // travels through the passthrough envelope and targets the outer
+    // window; the X11 fallback covers the terminals that ignore the
     // in-band resize escape.
     let env = |key: &str| std::env::var_os(key).and_then(|v| v.into_string().ok());
     let fit_on = fit::enabled(env("XC_ROWS").as_deref(), env("XC_NO_FIT").as_deref());
@@ -184,13 +186,10 @@ fn run(
     // Height the window had at startup (and the last one the user picked):
     // the size the fit restores on the way out.
     let mut baseline = crossterm::terminal::size()?.1;
-    // The one height the normal bar asks for all session; `--print-rows` and
-    // `scripts/xc-bar` compute the launch geometry with the same rule.
-    let stable_rows = fit::stable_rows(&app);
     let mut pending: Option<Asked> = None;
 
     loop {
-        fit_window(&fit, &mut pending, &app, stable_rows, Instant::now())?;
+        fit_window(&fit, &mut pending, &app, Instant::now())?;
         terminal.draw(|f| render::draw(f, &app))?;
         if event::poll(POLL_TIMEOUT)? {
             match event::read()? {
@@ -199,7 +198,7 @@ fn run(
                 // the user picked becomes the one restored at exit; our own
                 // request is the one that reports the height we asked for.
                 Event::Resize(_, rows) => {
-                    if rows != fit::desired_rows(&app, stable_rows) {
+                    if rows != fit::desired_rows(&app) {
                         baseline = rows;
                     }
                     fit_adopt(&mut pending);
@@ -250,47 +249,54 @@ struct Fit {
 }
 
 /// One height the fit is working on: what it wants, how many asks that
-/// took, and when the last one went out - the input of [`fit::may_ask`].
-/// `tries == fit::MAX_ASKS` parks the entry, whether because the window
-/// arrived at the wanted height, because a resize from outside won, or
-/// because the ask budget is spent.
+/// took, when the last one went out - the input of [`fit::may_ask`] - and
+/// when this wanted height started being wanted - the input of
+/// [`fit::may_switch`]'s settle window. `tries == fit::MAX_ASKS` parks the
+/// entry, whether because the window arrived at the wanted height, because
+/// a resize from outside won, or because the ask budget is spent.
 #[derive(Clone, Copy, Debug)]
 struct Asked {
     want: u16,
     tries: u8,
     at: Instant,
+    seen: Instant,
 }
 
-/// Move the terminal to the height the bar wants for the session. `pending`
-/// is the
-/// height the fit last asked for; it is repeated until the window reports that
+/// Move the terminal to the height the bar wants. `pending` is the height
+/// the fit last asked for; it is repeated until the window reports that
 /// height, because terminals apply the request asynchronously and a WM may not
-/// have activated the window on the very first frames. [`fit::may_ask`] paces
+/// have activated the window on the very first frames. The want itself is
+/// debounced: a new height is only asked for once it has stayed wanted past
+/// [`fit::SETTLE`], so a typing burst - whose candidate count changes per
+/// keystroke - coalesces into one resize. [`fit::may_ask`] paces
 /// the retries and caps them, so a terminal that ignores the mechanisms is not
 /// asked once per tick forever. The request keeps the current width: only the
 /// height is the bar's business. Best effort, a failing `xdotool` must never
 /// take the bar down, and the X11 fallback only fires for a focused window
 /// that provably belongs to this process tree.
-fn fit_window(
-    fit: &Fit,
-    pending: &mut Option<Asked>,
-    app: &App,
-    stable_rows: u16,
-    now: Instant,
-) -> Result<()> {
+fn fit_window(fit: &Fit, pending: &mut Option<Asked>, app: &App, now: Instant) -> Result<()> {
     if !fit.on {
         return Ok(());
     }
-    let want = fit::desired_rows(app, stable_rows);
+    let want = fit::desired_rows(app);
+    let opening = pending.is_none();
     let mut asked = match *pending {
         Some(asked) if asked.want == want => asked,
-        // A new wanted height: ask right away, whatever the last one cost.
+        // A new wanted height: its clock starts now, and the ask itself
+        // waits out `fit::SETTLE` (the opening height excepted), so a
+        // typing burst - whose candidate count changes per keystroke -
+        // coalesces into one resize instead of one per key.
         _ => Asked {
             want,
             tries: 0,
             at: now,
+            seen: now,
         },
     };
+    if !fit::may_switch(now.duration_since(asked.seen), opening) {
+        *pending = Some(asked);
+        return Ok(());
+    }
     if !fit::may_ask(asked.tries, now.duration_since(asked.at)) {
         *pending = Some(asked);
         return Ok(());
