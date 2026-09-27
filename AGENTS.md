@@ -16,7 +16,8 @@ alias + input runs a mapped command; working runs enter history. Store is
 - `src/launch.rs` + `src/launch/` — `@native app`: desktop-entry scan and
   name matching (names, keywords, exec basename, pinyin initials); a `://`
   input matching no entry opens in the default browser (`open`/`xdg-open`)
-- `src/alias.rs`, `src/storage/` — alias defs and the store
+- `src/alias.rs`, `src/storage/` — alias defs and the store; `load()` is NOT
+  read-only: out-of-date schema files are rewritten eagerly (`materialize`)
 - `src/plugins/` — home for built-in `@native` mini-tools (`mod.rs` registry); `pw` = password generator (simple/medium/complex profiles)
 - `src/cli.rs` — headless flags (`--print-app`, `--print-pass`, `--print-rows`, `--print-bind`)
 - `scripts/xc-{bar,key,icon,wechat,deploy}` — runtime/deploy helpers
