@@ -33,5 +33,8 @@ alias + input runs a mapped command; working runs enter history. Store is
 
 - `features/app-chrome-wechat.md` — wiring the `app` alias to Chrome WeChat
   (blueprint applied 2026-09-26: `xc-wechat` entry + linux URL passthrough)
+- `features/store-eager-migration.md` — `load()` materializes old-store
+  migrations (v5 base64 was lazy: plaintext lived on disk until the next
+  save; fix shipped 2026-09-27 as `78577fa`)
 - `features/pw-plugin.md` — built-in `pw` password generator: `src/plugins/`
   home, store v6 seed, `--print-pass` (shipped 2026-09-26 as `ae7c14c`)
