@@ -39,3 +39,4 @@ alias + input runs a mapped command; working runs enter history. Store is
   save; fix shipped 2026-09-27 as `78577fa`)
 - `features/pw-plugin.md` — built-in `pw` password generator: `src/plugins/`
   home, store v6 seed, `--print-pass` (shipped 2026-09-26 as `ae7c14c`)
+- `features/remote-deploy.md` — xc-deploy to `root@192.168.31.196` (2026-09-27): `Text file busy` helpers, `pkill -x` over ssh, session D-Bus needed to re-summon the bar
