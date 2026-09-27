@@ -83,6 +83,79 @@ fn v4_plaintext_shortcuts_resave_as_base64_at_the_current_version() {
     );
 }
 
+/// Regression (raw disk bytes): the v5 encoding must not stay lazy. A v3-era
+/// file keeps its plaintext shortcut values on disk until something saves,
+/// so loading one rewrites the file at the current version with every value
+/// base64-encoded. The plain round-trip tests above cannot catch a lingering
+/// plaintext file, because `decode_b64` falls back to the raw string.
+#[test]
+fn loading_an_old_store_rewrites_the_raw_file_with_encoded_shortcuts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+    let v3 = serde_json::json!({
+        "version": 3,
+        "aliases": [{
+            "name": "cd",
+            "triggers": ["cd"],
+            "linux": "cd {input}",
+            "macos": null,
+            "shortcuts": { "proj": "cd ~/projects/{input}" }
+        }],
+        "history": []
+    });
+    fs::write(&path, v3.to_string()).unwrap();
+
+    let store = load(&path);
+    assert_eq!(
+        store.aliases[0].shortcuts["proj"], "cd ~/projects/{input}",
+        "the plaintext value still loads into memory"
+    );
+
+    let raw = fs::read_to_string(&path).unwrap();
+    assert!(
+        raw.contains(&format!("\"version\": {SCHEMA_VERSION}")),
+        "the raw file is rewritten at the current version: {raw}"
+    );
+    assert!(
+        raw.contains(&encode_b64("cd ~/projects/{input}")),
+        "the shortcut value is base64 on disk: {raw}"
+    );
+    assert!(
+        !raw.contains("cd ~/projects/{input}"),
+        "the plaintext value is absent from the raw file: {raw}"
+    );
+
+    // The rewrite happens once: a file already at the current version is
+    // left byte-identical by later loads.
+    let settled = fs::read_to_string(&path).unwrap();
+    load(&path);
+    assert_eq!(fs::read_to_string(&path).unwrap(), settled);
+}
+
+/// The eager migration write-back must never touch a newer-build file:
+/// `load` leaves its raw bytes alone (and `save` keeps refusing it).
+#[test]
+fn loading_a_newer_version_file_leaves_the_raw_bytes_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+    let future = serde_json::json!({
+        "version": SCHEMA_VERSION + 93, // 99: far beyond this build
+        "aliases": [user_def("mine", Some("echo future"))],
+        "history": []
+    });
+    let original = serde_json::to_string_pretty(&future).unwrap();
+    fs::write(&path, &original).unwrap();
+
+    let store = load(&path);
+    assert!(store.from_newer_version);
+    assert_eq!(store.version, SCHEMA_VERSION + 93, "the version is kept");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        original,
+        "load must not rewrite a store from a newer build"
+    );
+}
+
 /// v5 files store base64 values, which decode on load; a value that is not
 /// valid base64 (a hand-edited plaintext entry) falls back to the raw
 /// string, and a save/load round trip keeps every value stable.

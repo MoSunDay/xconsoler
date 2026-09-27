@@ -23,8 +23,8 @@ pub const MAX_HISTORY: usize = 100;
 /// snapshots get appended by [`migrate`]. Version 5 base64-encodes every
 /// `"shortcuts"` value on disk (values can carry tokens, URLs and paths),
 /// mirroring the `input_b64` history field; [`load`] decodes them again,
-/// and older stores keep their plaintext values until the next save
-/// encodes them. Version 4 seeded the `app` alias (native application
+/// and an older store is rewritten with encoded values the first time it
+/// is loaded (see [`materialize`]). Version 4 seeded the `app` alias (native application
 /// launcher). Version 3 renamed the alias JSON keys to the UI vocabulary
 /// (`"triggers"` for the trigger words, `"shortcuts"` for the key → value
 /// map); the manual `AliasDef` deserializer normalizes legacy keys while
@@ -181,8 +181,11 @@ fn legacy_path() -> Option<PathBuf> {
 /// finds a real file. Corrupt JSON at `path` is moved aside to
 /// `<path>.corrupt` and a fresh seeded store is written to `path` right
 /// away; the legacy location is not consulted in that case. Stores older
-/// than [`SCHEMA_VERSION`] are migrated in memory (see [`accept`]); stores
-/// from a newer build are returned verbatim and marked `from_newer_version`.
+/// than [`SCHEMA_VERSION`] are migrated in memory (see [`accept`]) and
+/// persisted back to `path` immediately, best-effort, so a migration
+/// materializes on the first load instead of waiting for the next save;
+/// stores from a newer build are returned verbatim, marked
+/// `from_newer_version`, and their file is left untouched.
 pub fn load(path: &Path) -> Store {
     let legacy = legacy_fallback(path, legacy_path());
     load_with_legacy(path, legacy.as_deref())
@@ -205,7 +208,7 @@ fn load_with_legacy(path: &Path, legacy: Option<&Path>) -> Store {
         Err(_) => return read_fallback(path, legacy),
     };
     match serde_json::from_str::<Store>(&data) {
-        Ok(store) => accept(store),
+        Ok(store) => materialize(path, store),
         Err(err) => match declared_version(&data) {
             // Valid JSON from a newer build whose shape this build cannot
             // parse: leave it in place instead of renaming it `.corrupt`,
@@ -243,6 +246,23 @@ fn load_with_legacy(path: &Path, legacy: Option<&Path>) -> Store {
             }
         },
     }
+}
+
+/// A store parsed from an existing file at `path`: when the disk version is
+/// older than [`SCHEMA_VERSION`], [`accept`] has just migrated it in memory,
+/// and that migration is materialized right away (best-effort, like the
+/// legacy-move write-back in [`read_fallback`]) instead of waiting for the
+/// next explicit save — the v5 shortcut encoding would otherwise stay
+/// plaintext on disk for as long as the user never edits anything. Files at
+/// or above the current version, including those from a newer build, are
+/// returned without rewriting the file.
+fn materialize(path: &Path, store: Store) -> Store {
+    let disk_version = store.version;
+    let store = accept(store);
+    if disk_version < SCHEMA_VERSION {
+        let _ = save(path, &store);
+    }
+    store
 }
 
 /// Missing `path`: prefer a parseable store at the legacy location, else seed

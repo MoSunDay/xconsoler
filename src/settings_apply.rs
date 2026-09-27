@@ -240,6 +240,18 @@ mod tests {
         assert!(!form_open(&app), "the wizard closed");
         assert!(app.aliases.iter().any(|d| d.shortcuts.contains_key("gc")));
 
+        // Raw disk bytes: the value is base64-encoded (schema v5+), the
+        // plaintext never hits the file.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains(&storage::encode_b64("git clone {input}")),
+            "the shortcut value is base64 on disk: {raw}"
+        );
+        assert!(
+            !raw.contains("git clone {input}"),
+            "the plaintext value is absent from the raw file: {raw}"
+        );
+
         let reloaded = storage::load(&path);
         assert_eq!(
             reloaded.aliases[0].shortcuts.get("gc").map(String::as_str),
@@ -494,6 +506,19 @@ mod tests {
         assert!(ok, "got {msg}");
         assert_eq!(msg, "shortcut updated: br tieba = https://tieba.baidu.com");
         assert!(!form_open(&app), "the wizard closed");
+
+        // Raw disk bytes for the edit path too (Submission::EditShortcut):
+        // base64 value present, plaintext absent.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains(&storage::encode_b64("https://tieba.baidu.com")),
+            "the edited value is base64 on disk: {raw}"
+        );
+        assert!(
+            !raw.contains("https://tieba.baidu.com"),
+            "the plaintext value is absent from the raw file: {raw}"
+        );
+
         let reloaded = storage::load(&path);
         assert_eq!(
             reloaded.aliases[0]
