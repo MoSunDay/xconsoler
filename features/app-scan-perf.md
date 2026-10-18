@@ -44,3 +44,11 @@ dies after a successful run, so in-memory caching alone cannot amortize).
   frame (fit + draw), `wait_grace` sync-blocks up to 1s.
 
 482 tests green, clippy + fmt clean.
+
+## Target regression (root@192.168.31.196, 2026-10-18, HEAD `1145cc2`)
+- 239 desktop files, md5 local/remote match (`1741037f…`)
+- `--print-app` wall time incl. startup: baseline (no scan) ~3 ms,
+  cold ~22 ms, warm ~6 ms → scan cost ~19 ms → ~3 ms
+- root's cache built fine (245 entries, 6 dirs); user `m` builds theirs on
+  first `app` Enter; corrupt-cache and add-file live checks passed on the
+  dev box earlier the same day

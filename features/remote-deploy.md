@@ -18,3 +18,11 @@ passed (`--print-rows` = 4); local/remote md5 match (`204b23e2…`).
   here `unix:path=/run/user/1000/bus`) — without D-Bus, gnome-terminal
   spawns nothing and xc-bar fails silently. The summoned bar is dismissed
   by the session's alt+d as usual.
+
+## Deploy 2026-10-18 (HEAD `1145cc2`, md5 `1741037f…`)
+
+App-scan perf release. No `Text file busy` this time (`pkill -x` preemptively;
+nothing was running). Smoke test 4 rows. Re-summoned the bar for `m` on `:0`
+via `runuser -u m -- env DISPLAY=:0 XAUTHORITY=~m/.Xauthority
+DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus xc-bar` — summoned and
+toggle-dismissed cleanly. Regression numbers in `features/app-scan-perf.md`.
