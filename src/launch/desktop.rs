@@ -8,14 +8,17 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use super::pinyin;
 
+mod cache;
 mod scan;
 
 pub use scan::{on_path, scan};
 
 /// One installed application, as read from disk.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     /// Desktop id: file name minus ".desktop" (`org.gnome.Nautilus`).
     pub id: String,
@@ -31,6 +34,9 @@ pub struct Entry {
     pub keywords: Vec<String>,
     /// `NoDisplay=true` or `Hidden=true`.
     pub no_display: bool,
+    /// Lowercase match keys for this entry, computed once at parse time by
+    /// [`keys`] (see [`keys`] for what they spell).
+    pub keys: Vec<String>,
 }
 
 /// Parse one `.desktop` file into an [`Entry`]. Unknown and malformed lines
@@ -48,24 +54,61 @@ pub fn parse(text: &str, id: &str, path: &Path) -> Entry {
 /// in its own spelling (the Japanese `詳細` spells `xx`) and hide the app the
 /// user actually meant.
 fn parse_with_locale(text: &str, id: &str, path: &Path, locale: Option<&str>) -> Entry {
-    let mut localized: Option<String> = None;
-    let mut language: Option<String> = None;
-    let mut plain: Option<String> = None;
-    let mut keywords: Vec<String> = Vec::new();
-    let mut exec: Option<String> = None;
-    let mut no_display = false;
+    entry_from(collect(text, locale), id, path)
+}
+
+/// Every `[Desktop Entry]` field read in one pass over the file, before the
+/// menu rules (label choice, visibility) are applied. Splitting the read
+/// from the post-processing lets the scanner filter on the raw fields
+/// without walking the text twice.
+struct Raw {
+    /// `Name[<locale>]`, the exact-locale translation.
+    localized: Option<String>,
+    /// `Name[<language>]`, the bare-language fallback translation.
+    language: Option<String>,
+    /// The plain `Name`.
+    plain: Option<String>,
+    /// `Keywords` values (plain and the user's locale), split on `;`.
+    keywords: Vec<String>,
+    /// Raw `Exec=` value, field codes included.
+    exec: Option<String>,
+    /// `NoDisplay=true`.
+    no_display: bool,
+    /// `Hidden=true`.
+    hidden: bool,
+    /// `DBusActivatable=true`.
+    dbus: bool,
+    /// First `TryExec=` value, when the key is present.
+    try_exec: Option<String>,
+}
+
+/// Read every `[Desktop Entry]` field `text` carries, in a single pass.
+/// Booleans OR across occurrences, later `Name`/`Exec` lines overwrite
+/// earlier ones, keywords accumulate, and only the first `TryExec` counts.
+fn collect(text: &str, locale: Option<&str>) -> Raw {
+    let mut raw = Raw {
+        localized: None,
+        language: None,
+        plain: None,
+        keywords: Vec::new(),
+        exec: None,
+        no_display: false,
+        hidden: false,
+        dbus: false,
+        try_exec: None,
+    };
     for line in entry_lines(text) {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
         let (key, value) = (key.trim(), value.trim());
         if key == "Name" {
-            plain = Some(value.to_string());
+            raw.plain = Some(value.to_string());
         } else if let Some(tag) = key.strip_prefix("Name[").and_then(|k| k.strip_suffix(']')) {
             if Some(tag) == locale {
-                localized = Some(value.to_string());
-            } else if language.is_none() && wanted_tag(locale, tag) {
-                language = Some(value.to_string());
+                raw.localized = Some(value.to_string());
+            } else if raw.language.is_none() && wanted_tag(locale, tag) {
+                raw.language = Some(value.to_string());
             }
         } else if key == "Keywords" || key.starts_with("Keywords[") {
             let wanted = key
@@ -74,18 +117,33 @@ fn parse_with_locale(text: &str, id: &str, path: &Path, locale: Option<&str>) ->
                 .is_none_or(|tag| wanted_tag(locale, tag));
             if wanted {
                 for word in value.split(';').map(str::trim).filter(|w| !w.is_empty()) {
-                    keywords.push(word.to_string());
+                    raw.keywords.push(word.to_string());
                 }
             }
         } else if key == "Exec" {
-            exec = Some(value.to_string());
-        } else if key == "NoDisplay" || key == "Hidden" {
-            no_display |= value.eq_ignore_ascii_case("true");
+            raw.exec = Some(value.to_string());
+        } else if key == "TryExec" {
+            if raw.try_exec.is_none() {
+                raw.try_exec = Some(value.to_string());
+            }
+        } else if key == "NoDisplay" {
+            raw.no_display |= value.eq_ignore_ascii_case("true");
+        } else if key == "Hidden" {
+            raw.hidden |= value.eq_ignore_ascii_case("true");
+        } else if key == "DBusActivatable" {
+            raw.dbus |= value.eq_ignore_ascii_case("true");
         }
     }
-    let localized = non_empty(localized);
-    let language = non_empty(language);
-    let plain = non_empty(plain);
+    raw
+}
+
+/// Turn the one-pass read into an [`Entry`]: pick the label, keep the
+/// user-reachable names, fold the visibility flags, and precompute the
+/// match keys so [`score`] never rebuilds them per query.
+fn entry_from(raw: Raw, id: &str, path: &Path) -> Entry {
+    let localized = non_empty(raw.localized);
+    let language = non_empty(raw.language);
+    let plain = non_empty(raw.plain);
     let label = localized.or(language).or(plain.clone());
     let mut names: Vec<String> = Vec::new();
     if let Some(label) = label.clone() {
@@ -94,15 +152,18 @@ fn parse_with_locale(text: &str, id: &str, path: &Path, locale: Option<&str>) ->
     if let Some(plain) = plain {
         push_unique(&mut names, &plain);
     }
-    Entry {
+    let mut entry = Entry {
         id: id.to_string(),
         path: path.to_path_buf(),
         name: label.unwrap_or_else(|| id.to_string()),
         names,
-        exec,
-        keywords,
-        no_display,
-    }
+        exec: raw.exec,
+        keywords: raw.keywords,
+        no_display: raw.no_display || raw.hidden,
+        keys: Vec::new(),
+    };
+    entry.keys = keys(&entry);
+    entry
 }
 
 /// Lowercase match keys for `entry`, deduped, one-character keys dropped.
@@ -164,7 +225,8 @@ pub fn keys(entry: &Entry) -> Vec<String> {
 /// must pick the entry *called* that, not one that merely carries the words
 /// as a key. The length floors keep one- and two-letter fragments from
 /// matching half the machine: a two-letter token only prefixes, and a
-/// substring needs three.
+/// substring needs three. Keys come precomputed on the entry, so scoring
+/// stays a lookup rather than a rebuild.
 pub fn score(entry: &Entry, token: &str) -> u8 {
     let token = normalize(token);
     if token.is_empty() {
@@ -174,7 +236,8 @@ pub fn score(entry: &Entry, token: &str) -> u8 {
     if whole_name == token || entry.names.iter().any(|name| normalize(name) == token) {
         return 5;
     }
-    keys(entry)
+    entry
+        .keys
         .iter()
         .map(|key| key_score(key, &token))
         .max()
@@ -220,30 +283,6 @@ fn entry_lines(text: &str) -> impl Iterator<Item = &str> {
         }
         (in_entry && !trimmed.is_empty() && !trimmed.starts_with('#')).then_some(trimmed)
     })
-}
-
-/// First value of `key` in the `[Desktop Entry]` group.
-pub(super) fn field(text: &str, key: &str) -> Option<String> {
-    for line in entry_lines(text) {
-        if let Some((name, value)) = line.split_once('=') {
-            if name.trim() == key {
-                return Some(value.trim().to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Boolean desktop key (`Hidden`, `NoDisplay`, `DBusActivatable`).
-pub(super) fn flag(text: &str, key: &str) -> bool {
-    field(text, key).is_some_and(|value| value.eq_ignore_ascii_case("true"))
-}
-
-/// True when the entry can run: an `Exec=` command, or DBus activation (some
-/// GNOME apps ship no command and are started through their service file).
-pub(super) fn launchable(text: &str) -> bool {
-    let exec = field(text, "Exec").unwrap_or_default();
-    !exec.trim().is_empty() || flag(text, "DBusActivatable")
 }
 
 /// Locale tag for `Name[<locale>]` lookup: `LC_ALL` wins over `LANG`, and

@@ -6,3 +6,5 @@ openbox.log
 /store.json
 /store.json.corrupt
 /store.json.tmp
+/app-scan.json
+/app-scan.json.tmp

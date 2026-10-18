@@ -4,7 +4,7 @@
 use super::*;
 
 fn entry(id: &str, name: &str, path: &str) -> desktop::Entry {
-    desktop::Entry {
+    let mut e = desktop::Entry {
         id: id.to_string(),
         path: std::path::PathBuf::from(path),
         name: name.to_string(),
@@ -12,12 +12,17 @@ fn entry(id: &str, name: &str, path: &str) -> desktop::Entry {
         exec: Some(format!("{path} %U")),
         keywords: vec![],
         no_display: false,
-    }
+        keys: Vec::new(),
+    };
+    e.keys = desktop::keys(&e);
+    e
 }
 
 fn wechat() -> desktop::Entry {
     let mut e = entry("wechat", "WeChat", "/usr/share/applications/wechat.desktop");
     e.names.push("微信".to_string());
+    // Recompute: the extra name must be reachable as a key too.
+    e.keys = desktop::keys(&e);
     e
 }
 

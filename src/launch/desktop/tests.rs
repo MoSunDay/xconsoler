@@ -3,9 +3,11 @@
 
 use super::*;
 
-/// One entry with an explicit names list: the first name is the label.
+/// One entry with an explicit names list: the first name is the label. The
+/// match keys are filled the way [`parse`] fills them, so scoring tests run
+/// against what production would carry.
 fn entry(id: &str, names: &[&str], exec: &str, keywords: &[&str]) -> Entry {
-    Entry {
+    let mut e = Entry {
         id: id.to_string(),
         path: PathBuf::from(format!("/apps/{id}.desktop")),
         name: names.first().copied().unwrap_or(id).to_string(),
@@ -13,7 +15,10 @@ fn entry(id: &str, names: &[&str], exec: &str, keywords: &[&str]) -> Entry {
         exec: Some(exec.to_string()),
         keywords: keywords.iter().map(|k| k.to_string()).collect(),
         no_display: false,
-    }
+        keys: Vec::new(),
+    };
+    e.keys = keys(&e);
+    e
 }
 
 fn has(keys: &[String], key: &str) -> bool {
@@ -45,6 +50,20 @@ fn parse_reads_the_main_group_and_localized_names() {
     assert_eq!(e.exec.as_deref(), Some("/opt/wechat/wechat %U"));
     assert_eq!(e.keywords, vec!["IM".to_string(), "Chat".to_string()]);
     assert!(!e.no_display);
+}
+
+#[test]
+fn parse_precomputes_the_match_keys() {
+    // `score` reads the keys off the entry instead of rebuilding them, so
+    // parsing must hand it a ready-made list: id and pinyin initials both
+    // present right out of the file.
+    let e = parse_with_locale(WECHAT, "wechat", Path::new("/w.desktop"), Some("zh_CN"));
+    assert!(has(&e.keys, "wechat"), "the id is a key: {:?}", e.keys);
+    assert!(
+        has(&e.keys, "wx"),
+        "the pinyin initials of 微信 are a key: {:?}",
+        e.keys
+    );
 }
 
 #[test]

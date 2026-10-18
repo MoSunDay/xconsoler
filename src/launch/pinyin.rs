@@ -11,6 +11,9 @@
 //! ASCII input passes through unchanged, so `QQ音乐` spells `qqyl` / `qqyy`
 //! and mixed names stay predictable.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+
 use super::pinyin_table::GROUPS;
 
 /// How many acronym variants a single name may produce before the tail is
@@ -32,15 +35,27 @@ pub fn initials(character: char) -> Vec<char> {
         .collect()
 }
 
+/// Every table character with the bits of its readings' initial letters,
+/// built once per process: `GROUPS` strings total tens of kilobytes, and a
+/// desktop scan asks for hundreds of characters, so rescanning them per
+/// lookup dominates the scan's cost.
+fn mask_table() -> &'static HashMap<char, u32> {
+    static TABLE: OnceLock<HashMap<char, u32>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table: HashMap<char, u32> = HashMap::new();
+        for (letter, characters) in GROUPS {
+            let bit = 1 << (*letter as u32 - 'a' as u32);
+            for character in characters.chars() {
+                *table.entry(character).or_insert(0) |= bit;
+            }
+        }
+        table
+    })
+}
+
 /// Bit `n` set when `character` has a reading starting with `a + n`.
 pub fn initial_mask(character: char) -> u32 {
-    let mut mask = 0;
-    for (letter, characters) in GROUPS {
-        if characters.contains(character) {
-            mask |= 1 << (*letter as u32 - 'a' as u32);
-        }
-    }
-    mask
+    mask_table().get(&character).copied().unwrap_or(0)
 }
 
 /// Every initials acronym `name` can spell, most common readings first.
@@ -68,9 +83,11 @@ pub fn acronyms(name: &str) -> Vec<String> {
         variants = grown;
     }
 
+    let mut seen: HashSet<String> = HashSet::new();
     let mut unique: Vec<String> = Vec::new();
     for variant in variants {
-        if variant.chars().count() > 1 && !unique.contains(&variant) {
+        if variant.chars().count() > 1 && !seen.contains(&variant) {
+            seen.insert(variant.clone());
             unique.push(variant);
         }
     }
@@ -162,5 +179,15 @@ mod tests {
     fn letters_are_dropped_for_unknown_characters() {
         assert!(acronyms("★☆").is_empty());
         assert_eq!(acronyms("海"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn mask_table_keeps_multi_reading_bits_and_zeroes_the_unknown() {
+        // 重 reads chóng and zhòng: the memoized table must carry both bits.
+        let chong = 1 << ('c' as u32 - 'a' as u32);
+        let zhong = 1 << ('z' as u32 - 'a' as u32);
+        let mask = initial_mask('重');
+        assert_eq!(mask & (chong | zhong), chong | zhong);
+        assert_eq!(initial_mask('★'), 0);
     }
 }

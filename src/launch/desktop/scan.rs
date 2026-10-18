@@ -5,7 +5,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{field, flag, launchable, parse, Entry};
+use super::cache;
+use super::Entry;
 use crate::platform::Platform;
 
 /// Applications installed for `platform`, in menu precedence order.
@@ -15,10 +16,24 @@ use crate::platform::Platform;
 /// everywhere - the desktop spec's way to suppress a system entry, so a
 /// user's own copy shadows `/usr/share` without editing it. Entries that
 /// cannot run or cannot be read are skipped silently: one malformed file
-/// must never break the launcher.
+/// must never break the launcher. The Linux result is cached on disk, keyed
+/// by a fingerprint of the application directories (see the `cache`
+/// module), so the per-Enter process pays the walk once ever: served
+/// entries already carry their precomputed keys and have passed `TryExec`
+/// probing.
 pub fn scan(platform: Platform) -> Vec<Entry> {
     match platform {
-        Platform::Linux => scan_dirs(&linux_dirs()),
+        Platform::Linux => {
+            let dirs = linux_dirs();
+            let stamps = cache::fingerprint(&dirs);
+            let path = cache::cache_path();
+            if let Some(entries) = cache::load(&path, &stamps) {
+                return entries;
+            }
+            let entries = scan_dirs(&dirs);
+            cache::store(&path, &stamps, &entries);
+            entries
+        }
         Platform::Macos => scan_macos(),
     }
 }
@@ -60,15 +75,22 @@ fn scan_dirs(dirs: &[PathBuf]) -> Vec<Entry> {
             let Ok(text) = fs::read_to_string(&path) else {
                 continue;
             };
-            if flag(&text, "Hidden") || !launchable(&text) {
+            // One pass over the text: collect the fields, filter on them,
+            // then shape the survivor into an entry.
+            let raw = super::collect(&text, super::locale().as_deref());
+            // Hidden takes the id out of the menu for good; an entry that
+            // cannot run (no Exec command, no DBus activation) never shows.
+            if raw.hidden
+                || !(raw.exec.as_deref().is_some_and(|e| !e.trim().is_empty()) || raw.dbus)
+            {
                 continue;
             }
-            if let Some(binary) = field(&text, "TryExec").filter(|b| !b.is_empty()) {
-                if !on_path(&binary) {
+            if let Some(binary) = raw.try_exec.as_deref().filter(|b| !b.is_empty()) {
+                if !on_path(binary) {
                     continue;
                 }
             }
-            entries.push(parse(&text, &id, &path));
+            entries.push(super::entry_from(raw, &id, &path));
         }
     }
     entries
@@ -126,7 +148,7 @@ fn scan_macos() -> Vec<Entry> {
                 continue;
             }
             let name = id.clone();
-            entries.push(Entry {
+            let mut entry = Entry {
                 id,
                 path: bundle,
                 name: name.clone(),
@@ -134,7 +156,10 @@ fn scan_macos() -> Vec<Entry> {
                 exec: None,
                 keywords: Vec::new(),
                 no_display: false,
-            });
+                keys: Vec::new(),
+            };
+            entry.keys = super::keys(&entry);
+            entries.push(entry);
         }
     }
     entries
