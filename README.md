@@ -44,7 +44,7 @@ again on exit, so your shell prompt can re-apply its own).
 | Key (bar shown)        | Action                                  |
 |------------------------|-----------------------------------------|
 | `alt+d` (configurable) | open the command palette while shown; wake the bar while hidden |
-| `Enter`                | run selected match / submit `:` command |
+| `Enter`                | run selected match and close the bar / submit `:` command |
 | `Esc`                  | hide the bar (quits in `--summon` mode) |
 | `↑` `↓` / `Tab`        | move the candidate highlight            |
 | `Ctrl+N` / `Ctrl+P`    | move the candidate highlight down/up    |
@@ -489,8 +489,8 @@ setup is idempotent and falls back to a default-coloured window (one-line
 stderr warning) when gsettings/dconf are unavailable. It then runs
 `xconsoler --summon` inside that window (the `xterm` fallback gets the same
 geometry). Calling it again while the bar is up kills the bar instead of
-opening a second one, and a successful run dismisses it automatically,
-Spotlight-style.
+opening a second one, and a run that completes or hands off a background
+job dismisses it automatically, Spotlight-style.
 
 ## SSH deployment (no tmux)
 

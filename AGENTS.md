@@ -11,8 +11,9 @@ alias + input runs a mapped command; working runs enter history. Store is
 
 ## Module map
 
-- `src/run.rs` — input → alias dispatch; `src/exec.rs` — template expansion,
-  `{input}` / `@stdin`, native-backend dispatch
+- `src/run.rs` — input → alias dispatch; records proven successes, then
+  dismisses the bar on success or a handed-off background launch;
+  `src/exec.rs` — template expansion, `{input}` / `@stdin`, native-backend dispatch
 - `src/launch.rs` + `src/launch/` — `@native app`: desktop-entry scan and
   name matching (names, keywords, exec basename, pinyin initials); a `://`
   input matching no entry opens in the default browser (`open`/`xdg-open`)
@@ -43,3 +44,5 @@ alias + input runs a mapped command; working runs enter history. Store is
 - `features/app-scan-perf.md` — Enter-time `app` cost: single-pass scan,
   `Entry.keys` precomputed, pinyin mask table, `$HOME/xconsoler/app-scan.json`
   disk cache fingerprinted per dir/file (2026-10-18: 21ms → 4ms warm)
+- `features/auto-dismiss.md` — post-run dismissal in every mode: success
+  records history, `Started` quits without a record, failure stays open

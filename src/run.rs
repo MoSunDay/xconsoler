@@ -70,18 +70,16 @@ pub fn execute(app: &mut App, platform: Platform, path: &Path) {
                     format!("{} ran, but saving history failed: {e}", def.name),
                 ),
             });
-            // Desktop-launcher semantics: in summon mode a successful run
-            // dismisses the bar (Spotlight-style); the hotkey resummons it.
-            if app.summon {
-                app.quit = true;
-            }
+            // Desktop-launcher semantics: a completed run dismisses the bar
+            // in every mode (Spotlight-style); the wake key resummons it.
+            app.quit = true;
         }
         ExecOutcome::Started(msg) => {
             // Still running when the grace ran out: nothing proved success,
-            // so nothing is recorded. Not a failure either -- the input
-            // survives (it would otherwise be lost, since an unproven run is
-            // not in the history) and the bar stays open to show why.
+            // so nothing is recorded. The command was handed off, though, so
+            // the bar closes just like a successful run.
             app.status = Some((true, format!("{msg} (still running; not recorded)")));
+            app.quit = true;
         }
         ExecOutcome::Failure(msg) => {
             // Keep the input so it can be fixed and retried.
@@ -184,26 +182,32 @@ mod tests {
     }
 
     #[test]
-    fn summon_mode_quits_after_successful_execute() {
+    fn successful_execute_records_history_and_quits_in_both_modes() {
+        for summon in [false, true] {
+            let (mut app, _dir, path) = setup();
+            shown(&mut app);
+            app.summon = summon;
+            type_str(&mut app, ":add t,tt printf %s {input}", &path);
+            apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
+            assert!(!app.quit, "colon commands keep the bar open");
+
+            type_str(&mut app, "t hello", &path);
+            apply(&mut app, Action::Execute, Platform::Linux, &path);
+            assert!(app.quit, "execute dismisses the bar (summon={summon})");
+            assert_eq!(app.store.history.len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_failed_execute_keeps_the_bar_open_without_history() {
         let (mut app, _dir, path) = setup();
         shown(&mut app);
-        app.summon = true;
         type_str(&mut app, ":add t,tt printf %s {input}", &path);
         apply(&mut app, Action::SubmitColon, Platform::Linux, &path);
-        assert!(!app.quit, "colon commands keep the bar open");
-
-        type_str(&mut app, "t hello", &path);
+        app.input = "t ".to_string();
         apply(&mut app, Action::Execute, Platform::Linux, &path);
-        assert!(app.quit, "summon bar auto-dismisses on success");
-        assert_eq!(app.store.history.len(), 1);
-
-        // Failure keeps the bar open so the input can be fixed and retried.
-        let (mut app2, _dir, path2) = setup();
-        shown(&mut app2);
-        app2.summon = true;
-        app2.input = "t ".to_string();
-        apply(&mut app2, Action::Execute, Platform::Linux, &path2);
-        assert!(!app2.quit);
+        assert!(!app.quit, "failure keeps the bar open for a retry");
+        assert!(app.store.history.is_empty());
     }
 
     #[test]
@@ -429,8 +433,9 @@ mod tests {
             "an unproven launch must not enter history: {:?}",
             app.store.history
         );
-        // It is not in the history, so losing the input would lose the run.
-        assert_eq!(app.input, "bg", "input kept: {:?}", app.input);
+        // The command was handed off, so the bar closes even though the run
+        // did not prove itself and therefore left no history entry.
+        assert!(app.quit, "a started launch dismisses the bar");
     }
 
     #[test]
